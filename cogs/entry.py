@@ -3,6 +3,17 @@ from discord.ext import commands
 from discord import app_commands
 
 
+async def check_manage_or_admin(interaction: discord.Interaction) -> bool:
+    """Verifica se o usuário tem permissão de Gerenciar Servidor ou é Administrador"""
+    if interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild:
+        return True
+    await interaction.response.send_message(
+        "Você precisa de permissão de **Gerenciar Servidor** ou ser **Administrador** para usar este comando.",
+        ephemeral=True
+    )
+    return False
+
+
 class Entry(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -34,7 +45,7 @@ class Entry(commands.Cog):
     # ── Comando principal ─────────────────────────────────────────────────────
 
     @app_commands.command(name="setup", description="Configura as mensagens de entrada e saída do servidor.")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.check(check_manage_or_admin)
     async def setup(self, interaction: discord.Interaction):
         cog = self
 
