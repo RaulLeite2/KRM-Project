@@ -4,54 +4,46 @@ from discord import app_commands
 import os
 from pathlib import Path
 import dotenv
-import sqlite3
+import asyncpg
 
 dotenv.load_dotenv()
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="$", intents=intents)
 TOKEN = os.getenv("TOKEN")
-DB_PATH = "bot.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-def init_database():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
 
-    cursor.execute(
+async def init_database(pool: asyncpg.Pool):
+    await pool.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id INTEGER PRIMARY KEY,
-            welcome_channel_id INTEGER,
+            guild_id BIGINT PRIMARY KEY,
+            welcome_channel_id BIGINT,
             welcome_message TEXT,
-            exit_channel_id INTEGER,
+            exit_channel_id BIGINT,
             exit_message TEXT
         )
         """
     )
-
-    cursor.execute(
+    await pool.execute(
         """
         CREATE TABLE IF NOT EXISTS member_joins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            member_id INTEGER NOT NULL,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            guild_id BIGINT NOT NULL,
+            member_id BIGINT NOT NULL,
+            joined_at TIMESTAMP DEFAULT NOW()
         )
         """
     )
+    print("[DB] Tabelas verificadas.")
 
-    conn.commit()
-    conn.close()
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"[BOT] Logado como {bot.user} (ID: {bot.user.id})")
     print("------")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
+
 
 async def setup_cogs(bot):
     cogs = [
@@ -62,13 +54,26 @@ async def setup_cogs(bot):
 
     for cog in cogs:
         await bot.load_extension(cog)
+        print(f"[COGS] Carregado: {cog}")
 
-    print(f"{len(cogs)} cog(s) carregado(s).")
+    print(f"[COGS] {len(cogs)} cog(s) carregado(s).")
+
 
 async def setup_hook():
+    bot.pool = await asyncpg.create_pool(DATABASE_URL)
+    print("[DB] Pool de conexoes criado.")
+
+    await init_database(bot.pool)
     await setup_cogs(bot)
+
+    try:
+        synced = await bot.tree.sync()
+        names = [c.name for c in synced]
+        print(f"[SYNC] {len(synced)} comando(s) sincronizado(s): {names}")
+    except Exception as e:
+        print(f"[SYNC] Falha ao sincronizar comandos: {e}")
+
 
 bot.setup_hook = setup_hook
 
-init_database()
 bot.run(TOKEN)
