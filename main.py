@@ -36,6 +36,19 @@ async def init_database(pool: asyncpg.Pool):
         )
         """
     )
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_birthdays (
+            guild_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            day INTEGER NOT NULL CHECK (day BETWEEN 1 AND 31),
+            month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
     print("[DB] Tabelas verificadas.")
 
 
