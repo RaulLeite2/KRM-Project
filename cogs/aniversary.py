@@ -297,6 +297,13 @@ class Aniversary(commands.Cog):
         url: str | None = None,
         timestamp: bool = False,
     ):
+        if not interaction.guild or not interaction.channel:
+            await interaction.response.send_message(
+                "Este comando so funciona em canais de servidor.",
+                ephemeral=True,
+            )
+            return
+
         color = parse_hex_color(color_hex)
         if color_hex and color is None:
             await interaction.response.send_message(
@@ -319,9 +326,14 @@ class Aniversary(commands.Cog):
         ).build()
 
         view = BirthdayView(BirthdayRepository(self.bot.pool))
-        await interaction.response.send_message(
+        await interaction.response.defer(ephemeral=True)
+        await interaction.channel.send(
             embed=embed,
             view=view,
+        )
+        await interaction.followup.send(
+            "Painel de aniversario enviado no canal.",
+            ephemeral=True,
         )
 
 
