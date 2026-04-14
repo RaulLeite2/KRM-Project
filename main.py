@@ -49,6 +49,15 @@ async def init_database(pool: asyncpg.Pool):
         )
         """
     )
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS birthday_settings (
+            guild_id BIGINT PRIMARY KEY,
+            channel_id BIGINT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
     print("[DB] Tabelas verificadas.")
 
 

@@ -104,6 +104,26 @@ class BirthdayRepository:
             month,
         )
 
+    async def set_birthday_channel(self, guild_id: int, channel_id: int) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO birthday_settings (guild_id, channel_id)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id,
+                updated_at = NOW()
+            """,
+            guild_id,
+            channel_id,
+        )
+
+    async def get_birthday_channel(self, guild_id: int) -> int | None:
+        row = await self.pool.fetchrow(
+            "SELECT channel_id FROM birthday_settings WHERE guild_id = $1",
+            guild_id,
+        )
+        return row["channel_id"] if row else None
+
 
 class BirthdayEmbedBuilder:
     def __init__(
@@ -283,6 +303,13 @@ class Aniversary(commands.Cog):
         url="URL do titulo do embed (opcional)",
         timestamp="Adicionar timestamp no embed",
     )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def aniversary_embed(self, interaction: discord.Interaction, *args, **kwargs):
+        await interaction.response.send_message(
+            "Voce precisa da permissao de Gerenciar Servidor para usar este comando.",
+            ephemeral=True,
+        )
+    
     async def aniversary_embed(
         self,
         interaction: discord.Interaction,
@@ -335,6 +362,32 @@ class Aniversary(commands.Cog):
             "Painel de aniversario enviado no canal.",
             ephemeral=True,
         )
+
+    @aniversay.command(name="canal", description="Define o canal onde as mensagens de aniversario serao enviadas.")
+    @app_commands.describe(canal="Canal de texto para enviar as mensagens de aniversario")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_channel(self, interaction: discord.Interaction, canal: discord.TextChannel):
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Este comando so funciona em servidor.",
+                ephemeral=True,
+            )
+            return
+
+        repo = BirthdayRepository(self.bot.pool)
+        await repo.set_birthday_channel(interaction.guild.id, canal.id)
+        await interaction.response.send_message(
+            f"Canal de aniversarios definido para {canal.mention}.",
+            ephemeral=True,
+        )
+
+    @set_channel.error
+    async def set_channel_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "Voce precisa da permissao de Gerenciar Servidor para usar este comando.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot):
