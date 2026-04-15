@@ -304,12 +304,6 @@ class Aniversary(commands.Cog):
         timestamp="Adicionar timestamp no embed",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def aniversary_embed(self, interaction: discord.Interaction, *args, **kwargs):
-        await interaction.response.send_message(
-            "Voce precisa da permissao de Gerenciar Servidor para usar este comando.",
-            ephemeral=True,
-        )
-    
     async def aniversary_embed(
         self,
         interaction: discord.Interaction,
@@ -364,9 +358,9 @@ class Aniversary(commands.Cog):
         )
 
     @aniversay.command(name="canal", description="Define o canal onde as mensagens de aniversario serao enviadas.")
-    @app_commands.describe(canal="Canal de texto para enviar as mensagens de aniversario")
+    @app_commands.describe(canal="Canal de texto para enviar as mensagens de aniversario", message="Mensagem personalizada para aniversariantes (opcional)")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def set_channel(self, interaction: discord.Interaction, canal: discord.TextChannel):
+    async def set_channel(self, interaction: discord.Interaction, canal: discord.TextChannel, message: str | None = None):
         if not interaction.guild:
             await interaction.response.send_message(
                 "Este comando so funciona em servidor.",
