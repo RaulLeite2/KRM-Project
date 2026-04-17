@@ -27,6 +27,15 @@ async def init_database(pool: asyncpg.Pool):
         """
     )
     await pool.execute(
+        "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS welcome_embed JSONB"
+    )
+    await pool.execute(
+        "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS welcome_embed_previous JSONB"
+    )
+    await pool.execute(
+        "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS welcome_embed_previous_channel_id BIGINT"
+    )
+    await pool.execute(
         """
         CREATE TABLE IF NOT EXISTS member_joins (
             id SERIAL PRIMARY KEY,
