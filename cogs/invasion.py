@@ -7,6 +7,8 @@ from discord.ext import commands
 from discord import app_commands
 
 class Invasion(commands.Cog):
+    PARTICIPANTS_FIELD_NAME = "Participantes"
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -22,9 +24,13 @@ class Invasion(commands.Cog):
             CREATE TABLE IF NOT EXISTS invasions (
                 guild_id BIGINT PRIMARY KEY,
                 invasion_channel_id BIGINT NOT NULL,
-                absence_channel_id BIGINT NOT NULL
+                absence_channel_id BIGINT NOT NULL,
+                notify_role_id BIGINT
             )
             """
+        )
+        await pool.execute(
+            "ALTER TABLE invasions ADD COLUMN IF NOT EXISTS notify_role_id BIGINT"
         )
 
     def _get_pool(self):
@@ -55,21 +61,62 @@ class Invasion(commands.Cog):
         async with pool.acquire() as connection:
             return await connection.fetchrow(
                 """
-                SELECT invasion_channel_id, absence_channel_id
+                SELECT invasion_channel_id, absence_channel_id, notify_role_id
                 FROM invasions
                 WHERE guild_id = $1
                 """,
                 guild_id,
             )
 
+    def _build_participants_embed(self, source_embed: discord.Embed, member: discord.Member) -> tuple[discord.Embed, bool]:
+        updated_embed = discord.Embed.from_dict(source_embed.to_dict())
+        participants = []
+        participants_index = None
+
+        for index, field in enumerate(updated_embed.fields):
+            if field.name != self.PARTICIPANTS_FIELD_NAME:
+                continue
+            participants_index = index
+            participants = [line.strip() for line in field.value.splitlines() if line.strip()]
+            break
+
+        if member.mention in participants:
+            return updated_embed, False
+
+        participants.append(member.mention)
+        participants_value = "\n".join(participants)
+
+        if participants_index is None:
+            updated_embed.add_field(
+                name=self.PARTICIPANTS_FIELD_NAME,
+                value=participants_value,
+                inline=False,
+            )
+            return updated_embed, True
+
+        updated_embed.set_field_at(
+            participants_index,
+            name=self.PARTICIPANTS_FIELD_NAME,
+            value=participants_value,
+            inline=False,
+        )
+        return updated_embed, True
+
     @invasion.command(name="setup", description="Configura invasão e o chat de ausencias")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
         channel="Canal onde as notificações de invasão serão enviadas",
-        absence_channel="Canal onde os membros podem justificar suas ausências"
+        absence_channel="Canal onde os membros podem justificar suas ausências",
+        notify_role="Cargo que será marcado nas notificações de invasão"
     )
-    async def setup(self, interaction: discord.Interaction, channel: discord.TextChannel, absence_channel: discord.TextChannel):
+    async def setup(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        absence_channel: discord.TextChannel,
+        notify_role: Optional[discord.Role] = None,
+    ):
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
             return
@@ -81,14 +128,19 @@ class Invasion(commands.Cog):
 
         async with pool.acquire() as connection:
             await connection.execute("""
-                INSERT INTO invasions (guild_id, invasion_channel_id, absence_channel_id)
-                VALUES ($1, $2, $3)
+                INSERT INTO invasions (guild_id, invasion_channel_id, absence_channel_id, notify_role_id)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (guild_id) DO UPDATE
                 SET invasion_channel_id = EXCLUDED.invasion_channel_id,
-                    absence_channel_id = EXCLUDED.absence_channel_id
-            """, interaction.guild.id, channel.id, absence_channel.id)
+                    absence_channel_id = EXCLUDED.absence_channel_id,
+                    notify_role_id = EXCLUDED.notify_role_id
+            """, interaction.guild.id, channel.id, absence_channel.id, notify_role.id if notify_role else None)
 
-        await interaction.response.send_message(f"Invasão configurada para o canal {channel.mention} e justificativas para {absence_channel.mention}", ephemeral=True)
+        role_message = notify_role.mention if notify_role else "nenhum cargo"
+        await interaction.response.send_message(
+            f"Invasão configurada para o canal {channel.mention}, justificativas para {absence_channel.mention} e cargo notificado: {role_message}.",
+            ephemeral=True,
+        )
 
     @invasion.command(name="notify", description="Notifique sobre uma invasão iminente!")
     @app_commands.default_permissions(manage_guild=True)
@@ -128,6 +180,7 @@ class Invasion(commands.Cog):
 
         invasion_channel = interaction.guild.get_channel(config["invasion_channel_id"])
         absence_channel = interaction.guild.get_channel(config["absence_channel_id"])
+        notify_role = interaction.guild.get_role(config["notify_role_id"]) if config["notify_role_id"] else None
 
         if invasion_channel is None or absence_channel is None:
             await interaction.response.send_message(
@@ -141,13 +194,14 @@ class Invasion(commands.Cog):
             description=f"**Hora:** {time}\n**Descrição:** {description if description else 'Nenhuma descrição adicional fornecida.'}",
             color=discord.Color(embed_color)
         )
+        cog = self
 
         class IdleInvasionJustification(discord.ui.Modal):
             def __init__(self):
                 super().__init__(title="Justificativa para ficar de fora da invasão")
 
                 self.justification = discord.ui.TextInput(
-                    label="Por que você optou por ficar de fora da invasão?",
+                    label="Motivo da ausência",
                     style=discord.TextStyle.paragraph,
                     required=True,
                     max_length=500
@@ -181,14 +235,29 @@ class Invasion(commands.Cog):
 
             @discord.ui.button(label="Participar", style=discord.ButtonStyle.green)
             async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-                await interaction.response.send_message("Você se juntou à invasão!", ephemeral=True)
+                if not interaction.message or not interaction.message.embeds:
+                    await interaction.response.send_message("Não consegui atualizar a mensagem da invasão.", ephemeral=True)
+                    return
+
+                updated_embed, added = cog._build_participants_embed(interaction.message.embeds[0], interaction.user)
+                if not added:
+                    await interaction.response.send_message("Você já está marcado como participante dessa invasão.", ephemeral=True)
+                    return
+
+                await interaction.response.edit_message(embed=updated_embed, view=self)
+                await interaction.followup.send("Você se juntou à invasão!", ephemeral=True)
 
             @discord.ui.button(label="Ficar de fora", style=discord.ButtonStyle.red)
             async def idle(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.send_modal(IdleInvasionJustification())
 
         try:
-            await invasion_channel.send(embed=embed, view=InvasionButtons())
+            await invasion_channel.send(
+                content=notify_role.mention if notify_role else None,
+                embed=embed,
+                view=InvasionButtons(),
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "Não tenho permissão para enviar mensagens no canal de invasão configurado.",
