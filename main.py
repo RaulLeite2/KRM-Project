@@ -58,6 +58,16 @@ async def init_database(pool: asyncpg.Pool):
         );
         """
     )
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS birthday_panels (
+            id SERIAL PRIMARY KEY,
+            guild_id BIGINT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL UNIQUE
+        );
+        """
+    )
     print("[DB] Tabelas verificadas.")
 
 
@@ -87,6 +97,8 @@ async def setup_hook():
 
     await init_database(bot.pool)
     await setup_cogs(bot)
+
+
 
     try:
         synced = await bot.tree.sync()

@@ -124,6 +124,29 @@ class BirthdayRepository:
         )
         return row["channel_id"] if row else None
 
+    async def save_panel(self, guild_id: int, channel_id: int, message_id: int) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO birthday_panels (guild_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (message_id) DO NOTHING
+            """,
+            guild_id,
+            channel_id,
+            message_id,
+        )
+
+    async def get_all_panels(self):
+        return await self.pool.fetch(
+            "SELECT guild_id, channel_id, message_id FROM birthday_panels"
+        )
+
+    async def remove_panel(self, message_id: int) -> None:
+        await self.pool.execute(
+            "DELETE FROM birthday_panels WHERE message_id = $1",
+            message_id,
+        )
+
 
 class BirthdayEmbedBuilder:
     def __init__(
@@ -219,6 +242,7 @@ class BirthdaySelect(discord.ui.Select):
             ]
         )
         super().__init__(
+            custom_id="birthday_select",
             placeholder="Escolha um mes ou uma acao...",
             min_values=1,
             max_values=1,
@@ -281,12 +305,22 @@ class BirthdaySelect(discord.ui.Select):
 
 class BirthdayView(discord.ui.View):
     def __init__(self, repo: BirthdayRepository):
-        super().__init__(timeout=600)
+        super().__init__(timeout=None)
         self.add_item(BirthdaySelect(repo))
 
 class Aniversary(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        repo = BirthdayRepository(self.bot.pool)
+        panels = await repo.get_all_panels()
+        for panel in panels:
+            self.bot.add_view(
+                BirthdayView(repo),
+                message_id=panel["message_id"],
+            )
+        print(f"[VIEWS] {len(panels)} painel(is) de aniversario restaurado(s).")
     
     aniversay = app_commands.Group(name="aniversary", description="Commands related to aniversary settings")
 
@@ -346,12 +380,14 @@ class Aniversary(commands.Cog):
             use_timestamp=timestamp,
         ).build()
 
-        view = BirthdayView(BirthdayRepository(self.bot.pool))
+        repo = BirthdayRepository(self.bot.pool)
+        view = BirthdayView(repo)
         await interaction.response.defer(ephemeral=True)
-        await interaction.channel.send(
+        msg = await interaction.channel.send(
             embed=embed,
             view=view,
         )
+        await repo.save_panel(interaction.guild.id, interaction.channel.id, msg.id)
         await interaction.followup.send(
             "Painel de aniversario enviado no canal.",
             ephemeral=True,
