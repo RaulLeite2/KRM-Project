@@ -1502,8 +1502,6 @@ class SetupView(discord.ui.View):
 class Entry(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-    
-    entry = app_commands.Group(name="entry", description="Gerencia mensagens de entrada e saída do servidor.")
 
     # ── Eventos ──────────────────────────────────────────────────────────────
 
@@ -1533,80 +1531,6 @@ class Entry(commands.Cog):
             channel = member.guild.get_channel(row["exit_channel_id"])
             if channel:
                 await channel.send(row["exit_message"].replace("{member}", str(member)))
-
-    # ── Comando principal ─────────────────────────────────────────────────────
-
-    @entry.command(name="setup", description="Configura as mensagens de entrada e saída do servidor.")
-    @app_commands.check(check_manage_or_admin)
-    async def setup(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="⚙️ Configuração de Entrada/Saída",
-            description=(
-                "Selecione uma opção abaixo para gerenciar as mensagens do servidor.\n\n"
-                "Fluxo sugerido de entrada:\n"
-                "1) Configurar Boas-Vindas (Embed)\n"
-                "2) Editar Extras\n"
-                "3) Ajustar Fields\n"
-                "4) Simular e Confirmar"
-            ),
-            color=discord.Color.blurple(),
-        )
-        apply_step_footer(embed, 1, 4, "Inicie configurando a base do embed")
-        await interaction.response.send_message(embed=embed, view=SetupView(self.bot), ephemeral=True)
-
-    @entry.command(name="importar_embed_json", description="Importa um embed de boas-vindas via arquivo JSON para rascunho.")
-    @app_commands.check(check_manage_or_admin)
-    @app_commands.describe(
-        canal="Canal de boas-vindas para usar com o embed importado",
-        arquivo="Arquivo JSON com channel_id/payload ou somente payload",
-    )
-    async def importar_embed_json(
-        self,
-        interaction: discord.Interaction,
-        canal: discord.TextChannel,
-        arquivo: discord.Attachment,
-    ):
-        if not interaction.guild:
-            await interaction.response.send_message("Este comando so funciona em servidor.", ephemeral=True)
-            return
-
-        if not arquivo.filename.lower().endswith(".json"):
-            await interaction.response.send_message("Envie um arquivo .json valido.", ephemeral=True)
-            return
-
-        try:
-            raw = await arquivo.read()
-            parsed = json.loads(raw.decode("utf-8"))
-        except Exception:
-            await interaction.response.send_message("Nao foi possivel ler o JSON do arquivo.", ephemeral=True)
-            return
-
-        if isinstance(parsed, dict) and "payload" in parsed and isinstance(parsed.get("payload"), dict):
-            payload = normalize_import_payload(parsed["payload"])
-        elif isinstance(parsed, dict):
-            payload = normalize_import_payload(parsed)
-        else:
-            await interaction.response.send_message("JSON invalido para embed.", ephemeral=True)
-            return
-
-        validation_error = validate_welcome_embed_payload(payload)
-        if validation_error:
-            await interaction.response.send_message(validation_error, ephemeral=True)
-            return
-
-        preview_embed = build_welcome_embed_from_payload(payload, interaction.user)
-        if not preview_embed:
-            await interaction.response.send_message("Nao foi possivel montar o embed importado.", ephemeral=True)
-            return
-        apply_step_footer(preview_embed, 2, 4, "Arquivo importado, ajuste e confirme")
-
-        set_welcome_embed_draft(interaction.guild.id, interaction.user.id, canal.id, payload)
-        await interaction.response.send_message(
-            f"Arquivo importado para rascunho em {canal.mention}. Use Confirmar para salvar.",
-            embed=preview_embed,
-            ephemeral=True,
-        )
-
 
 async def setup(bot):
     await bot.add_cog(Entry(bot))
