@@ -215,3 +215,7 @@ class Invasion(commands.Cog):
                     "Você precisa da permissão 'Gerenciar Servidor' para usar este comando.",
                     ephemeral=True,
                 )
+
+
+async def setup(bot):
+    await bot.add_cog(Invasion(bot))
