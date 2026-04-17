@@ -390,55 +390,10 @@ class InvasionSetupModal(discord.ui.Modal, title="Configurar invasao"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class InvasionNotifyModal(discord.ui.Modal, title="Notificar invasao"):
-    title_input = discord.ui.TextInput(
-        label="Titulo da invasao",
-        placeholder="Ex: Ataque ao servidor X",
-        required=True,
-        max_length=256,
-    )
-    time_input = discord.ui.TextInput(
-        label="Hora (HH:MM)",
-        placeholder="21:30",
-        required=True,
-        max_length=5,
-    )
-    color_input = discord.ui.TextInput(
-        label="Cor HEX",
-        placeholder="#FF0000",
-        required=True,
-        max_length=7,
-    )
-    description_input = discord.ui.TextInput(
-        label="Descricao",
-        placeholder="Detalhes da invasao",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=1000,
-    )
-
-    def __init__(self, cog: "Painel"):
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._send_invasion_notification(
-            interaction,
-            str(self.title_input.value),
-            str(self.time_input.value),
-            str(self.color_input.value),
-            str(self.description_input.value).strip() or None,
-        )
-
-
 class InvasionPanelView(PanelBaseView):
     @discord.ui.button(label="Configurar invasao", style=discord.ButtonStyle.primary, row=0)
     async def setup_invasion(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(InvasionSetupModal(self.cog))
-
-    @discord.ui.button(label="Enviar notificacao", style=discord.ButtonStyle.success, row=0)
-    async def notify_invasion(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(InvasionNotifyModal(self.cog))
 
     @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -530,10 +485,10 @@ class Painel(commands.Cog):
     def _invasion_embed(self) -> discord.Embed:
         return self._panel_embed(
             "Painel de Invasao",
-            "Use os botoes para configurar os canais/cargo da invasao ou para enviar uma nova notificacao.",
+            "Use os botoes para configurar os canais e o cargo da invasao. O envio do aviso fica no comando /invasion notify.",
             2,
             4,
-            "Escolha se voce vai configurar a invasao ou enviar a notificacao.",
+            "Configure os canais da invasao aqui e use /invasion notify para disparar o aviso.",
         )
 
     @staticmethod
@@ -882,144 +837,6 @@ class Painel(commands.Cog):
         embed.add_field(name="Canal de saida", value=exit_channel, inline=True)
         embed.add_field(name="Mensagem de saida", value=exit_message[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def _send_invasion_notification(
-        self,
-        interaction: discord.Interaction,
-        titulo: str,
-        time: str,
-        cor: str,
-        description: str | None = None,
-    ):
-        if interaction.guild is None:
-            await interaction.response.send_message("Esse comando so pode ser usado em servidor.", ephemeral=True)
-            return
-
-        if self._get_pool() is None:
-            await interaction.response.send_message("Banco de dados indisponivel no momento.", ephemeral=True)
-            return
-
-        if not self._validate_time(time):
-            await interaction.response.send_message("Hora invalida. Use o formato HH:MM (24h).", ephemeral=True)
-            return
-
-        try:
-            embed_color = self._parse_hex_color(cor)
-        except ValueError:
-            await interaction.response.send_message(
-                "Cor invalida. Use hexadecimal, por exemplo FF0000 ou #FF0000.",
-                ephemeral=True,
-            )
-            return
-
-        config = await self._fetch_invasion_config(interaction.guild.id)
-        if config is None:
-            await interaction.response.send_message(
-                "Invasao ainda nao configurada. Volte ao painel e configure a invasao primeiro.",
-                ephemeral=True,
-            )
-            return
-
-        invasion_channel = interaction.guild.get_channel(config["invasion_channel_id"])
-        absence_channel = interaction.guild.get_channel(config["absence_channel_id"])
-        notify_role = interaction.guild.get_role(config["notify_role_id"]) if config["notify_role_id"] else None
-
-        if invasion_channel is None or absence_channel is None:
-            await interaction.response.send_message(
-                "Nao encontrei os canais configurados. Refaca a configuracao da invasao no painel.",
-                ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title=titulo,
-            description=f"**Hora:** {time}\n**Descricao:** {description if description else 'Nenhuma descricao adicional fornecida.'}",
-            color=discord.Color(embed_color),
-        )
-        apply_step_footer(embed, 4, 4, "Aguardando respostas dos membros nos botoes abaixo.")
-        cog = self
-
-        class IdleInvasionJustification(discord.ui.Modal):
-            def __init__(self):
-                super().__init__(title="Justificativa de ausencia")
-                self.justification = discord.ui.TextInput(
-                    label="Motivo da ausencia",
-                    style=discord.TextStyle.paragraph,
-                    required=True,
-                    max_length=500,
-                )
-                self.add_item(self.justification)
-
-            async def on_submit(self, interaction: discord.Interaction):
-                justification_embed = discord.Embed(
-                    title="Justificativa de ausencia",
-                    description=self.justification.value,
-                    color=discord.Color.orange(),
-                )
-                justification_embed.add_field(name="Membro", value=interaction.user.mention, inline=False)
-                justification_embed.add_field(name="Invasao", value=titulo, inline=False)
-                justification_embed.add_field(name="Hora", value=time, inline=True)
-                apply_step_footer(justification_embed, 4, 4, "Justificativa registrada no canal de ausencia.")
-
-                try:
-                    await absence_channel.send(embed=justification_embed)
-                except discord.Forbidden:
-                    await interaction.response.send_message(
-                        "Nao consegui enviar a justificativa no canal de ausencias.",
-                        ephemeral=True,
-                    )
-                    return
-
-                await interaction.response.send_message(
-                    "Justificativa recebida e enviada para o canal de ausencias.",
-                    ephemeral=True,
-                )
-
-        class InvasionButtons(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=3600)
-
-            @discord.ui.button(label="Participar", style=discord.ButtonStyle.green)
-            async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-                if not interaction.message or not interaction.message.embeds:
-                    await interaction.response.send_message("Nao consegui atualizar a mensagem da invasao.", ephemeral=True)
-                    return
-
-                updated_embed, added = cog._build_participants_embed(interaction.message.embeds[0], interaction.user)
-                if not added:
-                    await interaction.response.send_message("Voce ja esta marcado como participante dessa invasao.", ephemeral=True)
-                    return
-
-                await interaction.response.edit_message(embed=updated_embed, view=self)
-                await interaction.followup.send("Voce se juntou a invasao!", ephemeral=True)
-
-            @discord.ui.button(label="Ficar de fora", style=discord.ButtonStyle.red)
-            async def idle(self, interaction: discord.Interaction, button: discord.ui.Button):
-                await interaction.response.send_modal(IdleInvasionJustification())
-
-        try:
-            await invasion_channel.send(
-                content=notify_role.mention if notify_role else None,
-                embed=embed,
-                view=InvasionButtons(),
-                allowed_mentions=discord.AllowedMentions(roles=True),
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "Nao tenho permissao para enviar mensagens no canal de invasao configurado.",
-                ephemeral=True,
-            )
-            return
-
-        result_embed = self._panel_embed(
-            "Notificacao enviada",
-            f"A notificacao de invasao foi enviada em {invasion_channel.mention}.",
-            4,
-            4,
-            "Agora acompanhe as respostas dos membros na mensagem enviada.",
-            discord.Color.green(),
-        )
-        await interaction.response.send_message(embed=result_embed, ephemeral=True)
 
     @app_commands.command(name="painel", description="Abre o painel unico de configuracao do servidor.")
     @app_commands.check(check_manage_or_admin)
