@@ -8,7 +8,6 @@ from discord import app_commands
 from .aniversary import BirthdayEmbedBuilder, BirthdayRepository, BirthdayView, parse_hex_color
 from .entry import (
     ExitModal,
-    SetupView,
     WelcomeEmbedExtrasModal,
     WelcomeEmbedFieldAddModal,
     WelcomeEmbedFieldEditModal,
@@ -27,6 +26,7 @@ from .entry import (
     list_embed_fields_text,
     render_template_text,
     save_welcome_embed_payload,
+    set_welcome_embed_draft,
     validate_welcome_embed_payload,
 )
 
@@ -47,124 +47,165 @@ class PanelBaseView(discord.ui.View):
         return False
 
 
-class MainPanelView(PanelBaseView):
-    @discord.ui.button(label="Entrada", style=discord.ButtonStyle.primary, row=0)
-    async def entrada(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=self.cog._entry_embed(),
-            view=EntryMainView(self.cog, self.owner_id),
-        )
+class MainPanelSelect(discord.ui.Select):
+    def __init__(self, cog: "Painel", owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Entrada", value="entry", description="Configurar entrada e saida", emoji="📥"),
+            discord.SelectOption(label="Aniversario", value="birthday", description="Configurar painel e canal", emoji="🎂"),
+            discord.SelectOption(label="Invasao", value="invasion", description="Configurar canais da invasao", emoji="⚔️"),
+        ]
+        super().__init__(placeholder="Escolha uma area para configurar", min_values=1, max_values=1, options=options)
 
-    @discord.ui.button(label="Aniversario", style=discord.ButtonStyle.success, row=0)
-    async def aniversario(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=self.cog._birthday_embed(),
-            view=BirthdayPanelView(self.cog, self.owner_id),
-        )
-
-    @discord.ui.button(label="Invasao", style=discord.ButtonStyle.danger, row=0)
-    async def invasao(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "entry":
+            await interaction.response.edit_message(
+                embed=self.cog._entry_embed(),
+                view=EntryMainView(self.cog, self.owner_id),
+            )
+            return
+        if selected == "birthday":
+            await interaction.response.edit_message(
+                embed=self.cog._birthday_embed(),
+                view=BirthdayPanelView(self.cog, self.owner_id),
+            )
+            return
         await interaction.response.edit_message(
             embed=self.cog._invasion_embed(),
             view=InvasionPanelView(self.cog, self.owner_id),
         )
 
 
-class EntryMainView(PanelBaseView):
-    @discord.ui.button(label="Boas-vindas texto", style=discord.ButtonStyle.primary, row=0)
-    async def welcome_text(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeModal(self.cog.bot))
+class MainPanelView(PanelBaseView):
+    def __init__(self, cog: "Painel", owner_id: int, timeout: float = 600):
+        super().__init__(cog, owner_id, timeout=timeout)
+        self.add_item(MainPanelSelect(cog, owner_id))
 
-    @discord.ui.button(label="Boas-vindas embed", style=discord.ButtonStyle.primary, row=0)
-    async def welcome_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedModal(self.cog.bot))
 
-    @discord.ui.button(label="Extras do embed", style=discord.ButtonStyle.secondary, row=0)
-    async def embed_extras(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedExtrasModal(self.cog.bot))
+class EntryMainSelect(discord.ui.Select):
+    def __init__(self, cog: "Painel", owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Boas-vindas texto", value="welcome_text", description="Editar mensagem de boas-vindas"),
+            discord.SelectOption(label="Boas-vindas embed", value="welcome_embed", description="Editar embed de boas-vindas"),
+            discord.SelectOption(label="Extras do embed", value="embed_extras", description="Autor, thumbnail e imagem"),
+            discord.SelectOption(label="Fields do embed", value="fields", description="Adicionar, mover e remover fields"),
+            discord.SelectOption(label="Importar JSON", value="import_json", description="Importar configuracao de embed"),
+            discord.SelectOption(label="Configurar saida", value="exit_config", description="Definir mensagem de saida"),
+            discord.SelectOption(label="Simular embed", value="simulate_embed", description="Enviar simulacao no canal configurado"),
+            discord.SelectOption(label="Testar entrada", value="test_welcome", description="Enviar teste de boas-vindas"),
+            discord.SelectOption(label="Testar saida", value="test_exit", description="Enviar teste de saida"),
+            discord.SelectOption(label="Ver configuracao", value="view_config", description="Mostrar resumo da configuracao"),
+        ]
+        super().__init__(placeholder="Escolha uma acao da entrada/saida", min_values=1, max_values=1, options=options)
 
-    @discord.ui.button(label="Fields do embed", style=discord.ButtonStyle.secondary, row=0)
-    async def fields_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=self.cog._entry_fields_embed(),
-            view=EntryFieldsView(self.cog, self.owner_id),
-        )
-
-    @discord.ui.button(label="Importar JSON", style=discord.ButtonStyle.secondary, row=0)
-    async def import_json(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedImportJsonModal(self.cog.bot))
-
-    @discord.ui.button(label="Configurar saida", style=discord.ButtonStyle.primary, row=1)
-    async def exit_config(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ExitModal(self.cog.bot))
-
-    @discord.ui.button(label="Simular embed", style=discord.ButtonStyle.secondary, row=1)
-    async def simulate_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_simulate(interaction)
-
-    @discord.ui.button(label="Testar entrada", style=discord.ButtonStyle.secondary, row=1)
-    async def test_welcome(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_test_welcome(interaction)
-
-    @discord.ui.button(label="Testar saida", style=discord.ButtonStyle.secondary, row=1)
-    async def test_exit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_test_exit(interaction)
-
-    @discord.ui.button(label="Ver configuracao", style=discord.ButtonStyle.secondary, row=1)
-    async def view_config(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "welcome_text":
+            await interaction.response.send_modal(WelcomeModal(self.cog.bot))
+            return
+        if selected == "welcome_embed":
+            await interaction.response.send_modal(WelcomeEmbedModal(self.cog.bot))
+            return
+        if selected == "embed_extras":
+            await interaction.response.send_modal(WelcomeEmbedExtrasModal(self.cog.bot))
+            return
+        if selected == "fields":
+            await interaction.response.edit_message(
+                embed=self.cog._entry_fields_embed(),
+                view=EntryFieldsView(self.cog, self.owner_id),
+            )
+            return
+        if selected == "import_json":
+            await interaction.response.send_modal(WelcomeEmbedImportJsonModal(self.cog.bot))
+            return
+        if selected == "exit_config":
+            await interaction.response.send_modal(ExitModal(self.cog.bot))
+            return
+        if selected == "simulate_embed":
+            await self.cog._entry_simulate(interaction)
+            return
+        if selected == "test_welcome":
+            await self.cog._entry_test_welcome(interaction)
+            return
+        if selected == "test_exit":
+            await self.cog._entry_test_exit(interaction)
+            return
         await self.cog._entry_view_config(interaction)
 
+
+class EntryMainView(PanelBaseView):
+    def __init__(self, cog: "Painel", owner_id: int, timeout: float = 600):
+        super().__init__(cog, owner_id, timeout=timeout)
+        self.add_item(EntryMainSelect(cog, owner_id))
+
     @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=2)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=self.cog._main_embed(),
             view=MainPanelView(self.cog, self.owner_id),
         )
 
 
-class EntryFieldsView(PanelBaseView):
-    @discord.ui.button(label="Adicionar field", style=discord.ButtonStyle.primary, row=0)
-    async def add_field(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedFieldAddModal(self.cog.bot))
+class EntryFieldsSelect(discord.ui.Select):
+    def __init__(self, cog: "Painel"):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label="Adicionar field", value="add", description="Adicionar novo field no rascunho"),
+            discord.SelectOption(label="Editar field", value="edit", description="Editar field existente"),
+            discord.SelectOption(label="Mover field", value="move", description="Mudar ordem dos fields"),
+            discord.SelectOption(label="Remover field", value="remove", description="Excluir field do rascunho"),
+            discord.SelectOption(label="Listar fields", value="list", description="Mostrar fields atuais"),
+            discord.SelectOption(label="Restaurar anterior", value="restore", description="Carregar versao anterior salva"),
+            discord.SelectOption(label="Confirmar embed", value="confirm", description="Salvar rascunho no banco"),
+            discord.SelectOption(label="Cancelar rascunho", value="cancel", description="Descartar rascunho atual"),
+            discord.SelectOption(label="Resetar embed", value="reset", description="Remover embed salvo"),
+            discord.SelectOption(label="Simular embed", value="simulate", description="Enviar simulacao no canal"),
+        ]
+        super().__init__(placeholder="Escolha uma acao dos fields", min_values=1, max_values=1, options=options)
 
-    @discord.ui.button(label="Editar field", style=discord.ButtonStyle.primary, row=0)
-    async def edit_field(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedFieldEditModal(self.cog.bot))
-
-    @discord.ui.button(label="Mover field", style=discord.ButtonStyle.primary, row=0)
-    async def move_field(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedFieldMoveModal(self.cog.bot))
-
-    @discord.ui.button(label="Remover field", style=discord.ButtonStyle.primary, row=0)
-    async def remove_field(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WelcomeEmbedFieldRemoveModal(self.cog.bot))
-
-    @discord.ui.button(label="Listar fields", style=discord.ButtonStyle.secondary, row=0)
-    async def list_fields(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_list_fields(interaction)
-
-    @discord.ui.button(label="Restaurar anterior", style=discord.ButtonStyle.secondary, row=1)
-    async def restore_previous(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_restore_previous(interaction)
-
-    @discord.ui.button(label="Confirmar embed", style=discord.ButtonStyle.success, row=1)
-    async def confirm_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_confirm_embed(interaction)
-
-    @discord.ui.button(label="Cancelar rascunho", style=discord.ButtonStyle.secondary, row=1)
-    async def cancel_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_cancel_draft(interaction)
-
-    @discord.ui.button(label="Resetar embed", style=discord.ButtonStyle.danger, row=1)
-    async def reset_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._entry_reset_embed(interaction)
-
-    @discord.ui.button(label="Simular embed", style=discord.ButtonStyle.secondary, row=1)
-    async def simulate_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "add":
+            await interaction.response.send_modal(WelcomeEmbedFieldAddModal(self.cog.bot))
+            return
+        if selected == "edit":
+            await interaction.response.send_modal(WelcomeEmbedFieldEditModal(self.cog.bot))
+            return
+        if selected == "move":
+            await interaction.response.send_modal(WelcomeEmbedFieldMoveModal(self.cog.bot))
+            return
+        if selected == "remove":
+            await interaction.response.send_modal(WelcomeEmbedFieldRemoveModal(self.cog.bot))
+            return
+        if selected == "list":
+            await self.cog._entry_list_fields(interaction)
+            return
+        if selected == "restore":
+            await self.cog._entry_restore_previous(interaction)
+            return
+        if selected == "confirm":
+            await self.cog._entry_confirm_embed(interaction)
+            return
+        if selected == "cancel":
+            await self.cog._entry_cancel_draft(interaction)
+            return
+        if selected == "reset":
+            await self.cog._entry_reset_embed(interaction)
+            return
         await self.cog._entry_simulate(interaction)
 
+
+class EntryFieldsView(PanelBaseView):
+    def __init__(self, cog: "Painel", owner_id: int, timeout: float = 600):
+        super().__init__(cog, owner_id, timeout=timeout)
+        self.add_item(EntryFieldsSelect(cog))
+
     @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=2)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=self.cog._entry_embed(),
             view=EntryMainView(self.cog, self.owner_id),
@@ -288,20 +329,33 @@ class BirthdayPanelModal(discord.ui.Modal, title="Criar painel de aniversario"):
 
 
 class BirthdayPanelView(PanelBaseView):
-    @discord.ui.button(label="Criar painel", style=discord.ButtonStyle.success, row=0)
-    async def create_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BirthdayPanelModal(self.cog))
-
-    @discord.ui.button(label="Definir canal", style=discord.ButtonStyle.primary, row=0)
-    async def set_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BirthdayChannelModal(self.cog))
+    def __init__(self, cog: "Painel", owner_id: int, timeout: float = 600):
+        super().__init__(cog, owner_id, timeout=timeout)
+        options = [
+            discord.SelectOption(label="Criar painel", value="create", description="Criar mensagem interativa de aniversario"),
+            discord.SelectOption(label="Definir canal", value="channel", description="Salvar canal de aniversario"),
+        ]
+        self.add_item(BirthdayActionSelect(cog, options))
 
     @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=1)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=self.cog._main_embed(),
             view=MainPanelView(self.cog, self.owner_id),
         )
+
+
+class BirthdayActionSelect(discord.ui.Select):
+    def __init__(self, cog: "Painel", options: list[discord.SelectOption]):
+        self.cog = cog
+        super().__init__(placeholder="Escolha uma acao de aniversario", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "create":
+            await interaction.response.send_modal(BirthdayPanelModal(self.cog))
+            return
+        await interaction.response.send_modal(BirthdayChannelModal(self.cog))
 
 
 class InvasionSetupModal(discord.ui.Modal, title="Configurar invasao"):
