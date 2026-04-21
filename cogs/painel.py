@@ -105,7 +105,7 @@ class EntryMainSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         selected = self.values[0]
         if selected == "welcome_text":
-            await interaction.response.send_modal(WelcomeModal(self.cog.bot))
+            await self.cog._open_welcome_text_modal(interaction)
             return
         if selected == "welcome_embed":
             await interaction.response.send_modal(WelcomeEmbedModal(self.cog.bot))
@@ -123,7 +123,7 @@ class EntryMainSelect(discord.ui.Select):
             await interaction.response.send_modal(WelcomeEmbedImportJsonModal(self.cog.bot))
             return
         if selected == "exit_config":
-            await interaction.response.send_modal(ExitModal(self.cog.bot))
+            await self.cog._open_exit_config_modal(interaction)
             return
         if selected == "simulate_embed":
             await self.cog._entry_simulate(interaction)
@@ -628,6 +628,46 @@ class Painel(commands.Cog):
             "Revise os fields e escolha a proxima acao no painel.",
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _open_welcome_text_modal(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Este painel so funciona em servidor.", ephemeral=True)
+            return
+
+        pool = self._get_pool()
+        if pool is None:
+            await interaction.response.send_message("Banco de dados indisponivel no momento.", ephemeral=True)
+            return
+
+        row = await pool.fetchrow(
+            "SELECT welcome_channel_id, welcome_message FROM guild_settings WHERE guild_id = $1",
+            interaction.guild.id,
+        )
+        channel_id = row["welcome_channel_id"] if row else None
+        message = row["welcome_message"] if row else None
+        await interaction.response.send_modal(
+            WelcomeModal(self.bot, default_channel_id=channel_id, default_message=message)
+        )
+
+    async def _open_exit_config_modal(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Este painel so funciona em servidor.", ephemeral=True)
+            return
+
+        pool = self._get_pool()
+        if pool is None:
+            await interaction.response.send_message("Banco de dados indisponivel no momento.", ephemeral=True)
+            return
+
+        row = await pool.fetchrow(
+            "SELECT exit_channel_id, exit_message FROM guild_settings WHERE guild_id = $1",
+            interaction.guild.id,
+        )
+        channel_id = row["exit_channel_id"] if row else None
+        message = row["exit_message"] if row else None
+        await interaction.response.send_modal(
+            ExitModal(self.bot, default_channel_id=channel_id, default_message=message)
+        )
 
     async def _entry_restore_previous(self, interaction: discord.Interaction):
         if not interaction.guild:

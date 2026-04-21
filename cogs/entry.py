@@ -155,23 +155,31 @@ async def check_manage_or_admin(interaction: discord.Interaction) -> bool:
 
 
 class WelcomeModal(discord.ui.Modal, title="Configurar Boas-Vindas"):
-    channel_id_input = discord.ui.TextInput(
-        label="ID do Canal",
-        placeholder="Cole o ID do canal de boas-vindas",
-        required=True,
-        max_length=20,
-    )
-    message_input = discord.ui.TextInput(
-        label="Mensagem",
-        placeholder="Use {member} para mencionar o novo membro",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=2000,
-    )
-
-    def __init__(self, bot: commands.Bot):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        default_channel_id: int | None = None,
+        default_message: str | None = None,
+    ):
         super().__init__()
         self.bot = bot
+        self.channel_id_input = discord.ui.TextInput(
+            label="ID do Canal",
+            placeholder="Cole o ID do canal de boas-vindas",
+            required=True,
+            max_length=20,
+            default=str(default_channel_id) if default_channel_id else None,
+        )
+        self.message_input = discord.ui.TextInput(
+            label="Mensagem",
+            placeholder="Use {member} para mencionar o novo membro",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000,
+            default=(default_message or "")[:2000] or None,
+        )
+        self.add_item(self.channel_id_input)
+        self.add_item(self.message_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -213,23 +221,31 @@ class WelcomeModal(discord.ui.Modal, title="Configurar Boas-Vindas"):
         )
 
 class ExitModal(discord.ui.Modal, title="Configurar Saida"):
-    channel_id_input = discord.ui.TextInput(
-        label="ID do Canal",
-        placeholder="Cole o ID do canal de saida",
-        required=True,
-        max_length=20,
-    )
-    message_input = discord.ui.TextInput(
-        label="Mensagem",
-        placeholder="Use {member} para o nome do membro que saiu",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=2000,
-    )
-
-    def __init__(self, bot: commands.Bot):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        default_channel_id: int | None = None,
+        default_message: str | None = None,
+    ):
         super().__init__()
         self.bot = bot
+        self.channel_id_input = discord.ui.TextInput(
+            label="ID do Canal",
+            placeholder="Cole o ID do canal de saida",
+            required=True,
+            max_length=20,
+            default=str(default_channel_id) if default_channel_id else None,
+        )
+        self.message_input = discord.ui.TextInput(
+            label="Mensagem",
+            placeholder="Use {member} para o nome do membro que saiu",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000,
+            default=(default_message or "")[:2000] or None,
+        )
+        self.add_item(self.channel_id_input)
+        self.add_item(self.message_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if not interaction.guild:

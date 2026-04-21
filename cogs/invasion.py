@@ -1,5 +1,7 @@
 # ESTE COG NÃO SÃO COMANDOS DE RAID! E SIM DE NOTIFICAÇÃO DE INVASÃO!
+import asyncio
 from datetime import datetime
+import re
 from typing import Optional
 
 import discord
@@ -8,9 +10,11 @@ from discord import app_commands
 
 class Invasion(commands.Cog):
     PARTICIPANTS_FIELD_NAME = "Participantes"
+    HEX_COLOR_PATTERN = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
     def __init__(self, bot):
         self.bot = bot
+        self._participant_locks: dict[int, asyncio.Lock] = {}
 
     invasion = app_commands.Group(name="invasion", description="Comandos relacionados a invasoes")
 
@@ -39,7 +43,10 @@ class Invasion(commands.Cog):
 
     @staticmethod
     def _parse_hex_color(color_input: str) -> int:
-        cleaned = color_input.strip().lstrip("#")
+        cleaned = color_input.strip()
+        if not Invasion.HEX_COLOR_PATTERN.fullmatch(cleaned):
+            raise ValueError("Invalid color format")
+        cleaned = cleaned.lstrip("#")
         parsed = int(cleaned, 16)
         if parsed < 0 or parsed > 0xFFFFFF:
             raise ValueError("Color out of range")
@@ -48,10 +55,17 @@ class Invasion(commands.Cog):
     @staticmethod
     def _validate_time(time_input: str) -> bool:
         try:
-            datetime.strptime(time_input, "%H:%M")
+            datetime.strptime(time_input.strip(), "%H:%M")
             return True
         except ValueError:
             return False
+
+    def _get_participant_lock(self, message_id: int) -> asyncio.Lock:
+        lock = self._participant_locks.get(message_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._participant_locks[message_id] = lock
+        return lock
 
     async def _fetch_invasion_config(self, guild_id: int) -> Optional[dict]:
         pool = self._get_pool()
@@ -143,7 +157,7 @@ class Invasion(commands.Cog):
         absence_channel = interaction.guild.get_channel(config["absence_channel_id"])
         notify_role = interaction.guild.get_role(config["notify_role_id"]) if config["notify_role_id"] else None
 
-        if invasion_channel is None or absence_channel is None:
+        if not isinstance(invasion_channel, discord.TextChannel) or not isinstance(absence_channel, discord.TextChannel):
             await interaction.response.send_message(
                 "Nao encontrei os canais configurados. Refaca a configuracao da invasao no painel.",
                 ephemeral=True,
@@ -186,6 +200,12 @@ class Invasion(commands.Cog):
                         ephemeral=True,
                     )
                     return
+                except discord.HTTPException:
+                    await interaction.response.send_message(
+                        "Falha ao registrar a justificativa no canal de ausencias.",
+                        ephemeral=True,
+                    )
+                    return
 
                 await interaction.response.send_message(
                     "Justificativa recebida e enviada para o canal de ausencias.",
@@ -197,21 +217,42 @@ class Invasion(commands.Cog):
                 super().__init__(timeout=3600)
 
             @discord.ui.button(label="Participar", style=discord.ButtonStyle.green)
-            async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+            async def join(self, interaction: discord.Interaction, _button: discord.ui.Button):
                 if not interaction.message or not interaction.message.embeds:
                     await interaction.response.send_message("Nao consegui atualizar a mensagem da invasao.", ephemeral=True)
                     return
 
-                updated_embed, added = cog._build_participants_embed(interaction.message.embeds[0], interaction.user)
-                if not added:
-                    await interaction.response.send_message("Voce ja esta marcado como participante dessa invasao.", ephemeral=True)
+                if interaction.channel is None:
+                    await interaction.response.send_message("Nao consegui atualizar a mensagem da invasao.", ephemeral=True)
                     return
 
-                await interaction.response.edit_message(embed=updated_embed, view=self)
+                lock = cog._get_participant_lock(interaction.message.id)
+                async with lock:
+                    try:
+                        latest_message = await interaction.channel.fetch_message(interaction.message.id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        await interaction.response.send_message("Nao consegui atualizar a mensagem da invasao.", ephemeral=True)
+                        return
+
+                    if not latest_message.embeds:
+                        await interaction.response.send_message("Nao consegui atualizar a mensagem da invasao.", ephemeral=True)
+                        return
+
+                    updated_embed, added = cog._build_participants_embed(latest_message.embeds[0], interaction.user)
+                    if not added:
+                        await interaction.response.send_message("Voce ja esta marcado como participante dessa invasao.", ephemeral=True)
+                        return
+
+                    try:
+                        await interaction.response.edit_message(embed=updated_embed, view=self)
+                    except discord.HTTPException:
+                        await interaction.response.send_message("Falha ao atualizar participantes da invasao.", ephemeral=True)
+                        return
+
                 await interaction.followup.send("Voce se juntou a invasao!", ephemeral=True)
 
             @discord.ui.button(label="Ficar de fora", style=discord.ButtonStyle.red)
-            async def idle(self, interaction: discord.Interaction, button: discord.ui.Button):
+            async def idle(self, interaction: discord.Interaction, _button: discord.ui.Button):
                 await interaction.response.send_modal(IdleInvasionJustification())
 
         try:
@@ -224,6 +265,12 @@ class Invasion(commands.Cog):
         except discord.Forbidden:
             await interaction.response.send_message(
                 "Nao tenho permissao para enviar mensagens no canal de invasao configurado.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "Falha ao enviar a notificacao de invasao. Tente novamente em instantes.",
                 ephemeral=True,
             )
             return
@@ -247,7 +294,7 @@ class Invasion(commands.Cog):
 
     @notify.error
     async def invasion_notify_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
+        if isinstance(error, (app_commands.MissingPermissions, app_commands.CheckFailure)):
             if interaction.response.is_done():
                 await interaction.followup.send(
                     "Voce precisa da permissao de Gerenciar Servidor para usar este comando.",
@@ -258,6 +305,18 @@ class Invasion(commands.Cog):
                     "Voce precisa da permissao de Gerenciar Servidor para usar este comando.",
                     ephemeral=True,
                 )
+            return
+
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "Ocorreu um erro inesperado ao enviar a notificacao de invasao.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "Ocorreu um erro inesperado ao enviar a notificacao de invasao.",
+                ephemeral=True,
+            )
     
     
 
