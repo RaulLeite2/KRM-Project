@@ -86,6 +86,13 @@ async def on_ready():
     print("------")
 
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    raise error
+
+
 async def setup_cogs(bot):
     cogs = [
         path.with_suffix("").as_posix().replace("/", ".")

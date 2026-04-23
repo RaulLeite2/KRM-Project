@@ -217,6 +217,136 @@ class TicketOpenMessageModal(discord.ui.Modal, title="Mensagem de abertura"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+class TicketOpenEmbedModal(discord.ui.Modal, title="Embed de abertura do ticket"):
+    title_input = discord.ui.TextInput(
+        label="Titulo do embed",
+        placeholder="Bem-vindo ao seu ticket!",
+        required=True,
+        max_length=256,
+    )
+    description_input = discord.ui.TextInput(
+        label="Descricao",
+        placeholder="Ola {member}, descreva o problema para a equipe.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+    )
+    color_input = discord.ui.TextInput(
+        label="Cor HEX (opcional)",
+        placeholder="#5865F2",
+        required=False,
+        max_length=7,
+    )
+    footer_input = discord.ui.TextInput(
+        label="Footer (opcional)",
+        placeholder="KRM Support",
+        required=False,
+        max_length=2048,
+    )
+    image_url_input = discord.ui.TextInput(
+        label="URL da imagem (opcional)",
+        placeholder="https://...",
+        required=False,
+        max_length=300,
+    )
+
+    def __init__(self, cog: "Ticket", defaults: dict | None = None):
+        super().__init__()
+        self.cog = cog
+        if defaults:
+            self.title_input.default = str(defaults.get("title", ""))[:256] or None
+            self.description_input.default = str(defaults.get("description", ""))[:2000] or None
+            raw_color = defaults.get("color")
+            if isinstance(raw_color, int):
+                self.color_input.default = f"#{raw_color:06X}"
+            elif raw_color:
+                self.color_input.default = str(raw_color)
+            footer_val = defaults.get("footer")
+            self.footer_input.default = str(footer_val)[:2048] if footer_val else None
+            image_val = defaults.get("image_url")
+            self.image_url_input.default = str(image_val)[:300] if image_val else None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
+            return
+
+        title = str(self.title_input.value).strip()
+        description = str(self.description_input.value).strip()
+        if not title or not description:
+            await interaction.response.send_message("Titulo e descricao sao obrigatorios.", ephemeral=True)
+            return
+
+        color_raw = str(self.color_input.value).strip().lstrip("#") if self.color_input.value else ""
+        color_int = None
+        if color_raw:
+            try:
+                color_int = int(color_raw, 16)
+                if not (0 <= color_int <= 0xFFFFFF):
+                    raise ValueError
+            except ValueError:
+                await interaction.response.send_message(
+                    "Cor invalida. Use HEX de 6 digitos, ex: #5865F2.", ephemeral=True
+                )
+                return
+
+        embed_payload = {
+            "title": title,
+            "description": description,
+            "color": color_int,
+            "footer": str(self.footer_input.value).strip() or None,
+            "image_url": str(self.image_url_input.value).strip() or None,
+        }
+        await self.cog._upsert_ticket_settings(interaction.guild.id, open_embed=embed_payload)
+
+        preview = discord.Embed(
+            title=title,
+            description=description
+                .replace("{member}", interaction.user.mention)
+                .replace("{server}", interaction.guild.name),
+            color=discord.Color(color_int) if color_int is not None else discord.Color.blurple(),
+        )
+        if embed_payload["footer"]:
+            preview.set_footer(text=embed_payload["footer"])
+        if embed_payload["image_url"]:
+            preview.set_image(url=embed_payload["image_url"])
+        await interaction.response.send_message("Embed de abertura salvo! Preview:", embed=preview, ephemeral=True)
+
+
+class TicketOpenTypeSelect(discord.ui.Select):
+    def __init__(self, cog: "Ticket", owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Texto", value="text", description="Mensagem de texto simples"),
+            discord.SelectOption(label="Embed", value="embed", description="Embed com titulo, cor e imagem"),
+        ]
+        super().__init__(placeholder="Escolha o tipo de mensagem de abertura", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "text":
+            settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
+            await interaction.response.send_modal(
+                TicketOpenMessageModal(self.cog, (settings or {}).get("open_message"))
+            )
+            return
+        settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
+        raw_embed = (settings or {}).get("open_embed")
+        defaults = raw_embed if isinstance(raw_embed, dict) else None
+        await interaction.response.send_modal(TicketOpenEmbedModal(self.cog, defaults))
+
+
+class TicketOpenTypeView(PanelBaseView):
+    def __init__(self, cog: "Ticket", owner_id: int):
+        super().__init__(cog, owner_id)
+        self.add_item(TicketOpenTypeSelect(cog, owner_id))
+
+    @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=2)
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.cog._main_embed(), view=TicketMainView(self.cog, self.owner_id))
+
+
 class TicketChannelAddModal(discord.ui.Modal, title="Adicionar canal de ticket"):
     source_channel_input = discord.ui.TextInput(
         label="ID do canal onde o painel sera enviado",
@@ -231,7 +361,7 @@ class TicketChannelAddModal(discord.ui.Modal, title="Adicionar canal de ticket")
         max_length=20,
     )
     custom_message_input = discord.ui.TextInput(
-        label="Mensagem personalizada para este canal (opcional)",
+        label="Mensagem personalizada (opcional)",
         placeholder="Usada apenas se a configuracao global estiver em 'nao'",
         required=False,
         style=discord.TextStyle.paragraph,
@@ -422,8 +552,10 @@ class TicketMainSelect(discord.ui.Select):
             await interaction.response.send_modal(TicketGeneralModal(self.cog, defaults or {}))
             return
         if selected == "open_message":
-            settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
-            await interaction.response.send_modal(TicketOpenMessageModal(self.cog, (settings or {}).get("open_message")))
+            await interaction.response.edit_message(
+                embed=self.cog._open_message_type_embed(),
+                view=TicketOpenTypeView(self.cog, self.owner_id),
+            )
             return
         if selected == "channels":
             await interaction.response.edit_message(
@@ -570,6 +702,9 @@ class Ticket(commands.Cog):
             )
             """
         )
+        await pool.execute(
+            "ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS open_embed JSONB"
+        )
 
         self.bot.add_view(TicketPanelPostView())
         self.bot.add_view(TicketCloseView())
@@ -603,6 +738,17 @@ class Ticket(commands.Cog):
             "Selecione a proxima etapa para configurar.",
         )
 
+    def _open_message_type_embed(self) -> discord.Embed:
+        return self._panel_embed(
+            "Mensagem de Abertura",
+            "Escolha o formato da mensagem enviada ao abrir um ticket.\n\n"
+            "• **Texto** — mensagem simples (suporta `{member}`, `{server}`)\n"
+            "• **Embed** — embed personalizado com titulo, cor, imagem e footer",
+            2,
+            5,
+            "Escolha Texto ou Embed para configurar.",
+        )
+
     def _ticket_channels_embed(self) -> discord.Embed:
         return self._panel_embed(
             "Canais de Ticket",
@@ -615,7 +761,10 @@ class Ticket(commands.Cog):
     def _ticket_roles_embed(self) -> discord.Embed:
         return self._panel_embed(
             "Cargos de Ticket",
-            "Defina quais cargos de equipe terao acesso automatico aos canais de ticket.",
+            "Defina quais cargos de equipe terao acesso automatico aos canais de ticket.\n\n"
+            "**Como pegar o ID de um cargo:** Ative o Modo Desenvolvedor no Discord "
+            "([saiba como](https://www.howtogeek.com/714348/how-to-enable-or-disable-developer-mode-on-discord/)), "
+            "clique com o botao direito no cargo e selecione **Copiar ID**.",
             4,
             5,
             "Adicione, remova ou liste cargos de suporte.",
@@ -627,7 +776,7 @@ class Ticket(commands.Cog):
             return None
         row = await pool.fetchrow(
             """
-            SELECT guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id
+            SELECT guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id, open_embed
             FROM ticket_settings
             WHERE guild_id = $1
             """,
@@ -644,6 +793,7 @@ class Ticket(commands.Cog):
         use_same_message: bool | None = None,
         archive_category_id: int | None = None,
         log_channel_id: int | None = None,
+        open_embed: dict | None = None,
     ) -> None:
         pool = self._get_pool()
         if pool is None:
@@ -655,13 +805,14 @@ class Ticket(commands.Cog):
         next_same = use_same_message if use_same_message is not None else current.get("use_same_message", True)
         next_archive = archive_category_id if archive_category_id is not None else current.get("archive_category_id")
         next_log = log_channel_id if log_channel_id is not None else current.get("log_channel_id")
+        next_embed = open_embed if open_embed is not None else current.get("open_embed")
 
         await pool.execute(
             """
             INSERT INTO ticket_settings (
-                guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id, updated_at
+                guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id, open_embed, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
             ON CONFLICT (guild_id)
             DO UPDATE SET
                 open_message = EXCLUDED.open_message,
@@ -669,6 +820,7 @@ class Ticket(commands.Cog):
                 use_same_message = EXCLUDED.use_same_message,
                 archive_category_id = EXCLUDED.archive_category_id,
                 log_channel_id = EXCLUDED.log_channel_id,
+                open_embed = EXCLUDED.open_embed,
                 updated_at = NOW()
             """,
             guild_id,
@@ -677,6 +829,7 @@ class Ticket(commands.Cog):
             next_same,
             next_archive,
             next_log,
+            next_embed,
         )
 
     async def _upsert_ticket_channel(
@@ -893,9 +1046,19 @@ class Ticket(commands.Cog):
             "Revise tudo antes de publicar os paineis.",
         )
         embed.add_field(
-            name="Mensagem de abertura",
+            name="Tipo de abertura",
+            value="Embed" if settings.get("open_embed") else "Texto",
+            inline=True,
+        )
+        embed.add_field(
+            name="Mensagem de abertura (texto)",
             value=_short_text(settings.get("open_message")),
             inline=False,
+        )
+        embed.add_field(
+            name="Embed de abertura",
+            value=("Configurado" if settings.get("open_embed") else "Nao configurado"),
+            inline=True,
         )
         embed.add_field(
             name="Mensagem de fechamento",
@@ -1029,26 +1192,50 @@ class Ticket(commands.Cog):
 
         use_same = bool(settings.get("use_same_message", True))
         base_message = settings.get("open_message") or "Ticket aberto com sucesso."
+        open_embed_payload = settings.get("open_embed")
         if not use_same and cfg.get("custom_open_message"):
             base_message = cfg["custom_open_message"]
+            open_embed_payload = None
 
-        content = (
-            base_message
-            .replace("{member}", interaction.user.mention)
-            .replace("{user}", interaction.user.mention)
-            .replace("{server}", guild.name)
-        )
         support_mentions = " ".join([f"<@&{r}>" for r in support_role_ids])
-        open_embed = discord.Embed(
-            title="Ticket Aberto",
-            description=content,
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow(),
-        )
+        if open_embed_payload and isinstance(open_embed_payload, dict):
+            raw_color = open_embed_payload.get("color")
+            embed_color = discord.Color(raw_color) if isinstance(raw_color, int) else discord.Color.green()
+            desc = (
+                str(open_embed_payload.get("description", ""))
+                .replace("{member}", interaction.user.mention)
+                .replace("{user}", interaction.user.mention)
+                .replace("{server}", guild.name)
+            )
+            open_embed = discord.Embed(
+                title=str(open_embed_payload.get("title", "Ticket Aberto")),
+                description=desc,
+                color=embed_color,
+                timestamp=datetime.utcnow(),
+            )
+            if open_embed_payload.get("footer"):
+                open_embed.set_footer(text=str(open_embed_payload["footer"]))
+            else:
+                open_embed.set_footer(text="Use o botao abaixo para fechar o ticket")
+            if open_embed_payload.get("image_url"):
+                open_embed.set_image(url=str(open_embed_payload["image_url"]))
+        else:
+            content = (
+                base_message
+                .replace("{member}", interaction.user.mention)
+                .replace("{user}", interaction.user.mention)
+                .replace("{server}", guild.name)
+            )
+            open_embed = discord.Embed(
+                title="Ticket Aberto",
+                description=content,
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow(),
+            )
+            open_embed.set_footer(text="Use o botao abaixo para fechar o ticket")
+
         open_embed.add_field(name="Criado por", value=interaction.user.mention, inline=True)
         open_embed.add_field(name="Canal de origem", value=interaction.channel.mention, inline=True)
-        open_embed.set_footer(text="Use o botao abaixo para fechar o ticket")
-
         await ticket_channel.send(content=support_mentions or None, embed=open_embed, view=TicketCloseView())
         await interaction.response.send_message(f"Ticket criado em {ticket_channel.mention}", ephemeral=True)
 
