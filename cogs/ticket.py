@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Optional
@@ -24,6 +25,18 @@ def _sanitize_channel_name(name: str) -> str:
     return cleaned or "ticket"
 
 
+def _normalize_open_embed(raw: object) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
 class PanelBaseView(discord.ui.View):
     def __init__(self, cog: "Ticket", owner_id: int, timeout: float = 600):
         super().__init__(timeout=timeout)
@@ -41,21 +54,37 @@ class PanelBaseView(discord.ui.View):
 
 
 class TicketPanelPostView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, cog: "Ticket", source_channel_id: int, buttons: list[dict]):
         super().__init__(timeout=None)
+        for button_cfg in buttons[:25]:
+            self.add_item(TicketOpenButton(cog, source_channel_id, button_cfg))
 
-    @discord.ui.button(
-        label="Abrir Ticket",
-        style=discord.ButtonStyle.green,
-        emoji="🎫",
-        custom_id="ticket:open",
-    )
-    async def open_ticket(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        cog: Optional[Ticket] = interaction.client.get_cog("Ticket")  # type: ignore[attr-defined]
-        if cog is None:
+
+class TicketOpenButton(discord.ui.Button):
+    STYLE_MAP = {
+        "primary": discord.ButtonStyle.primary,
+        "secondary": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success,
+        "danger": discord.ButtonStyle.danger,
+    }
+
+    def __init__(self, cog: "Ticket", source_channel_id: int, button_cfg: dict):
+        self.cog = cog
+        self.source_channel_id = source_channel_id
+        self.button_key = str(button_cfg["button_key"])
+        style = self.STYLE_MAP.get(str(button_cfg.get("style", "primary")), discord.ButtonStyle.primary)
+        super().__init__(
+            label=str(button_cfg["button_label"]),
+            style=style,
+            emoji=(str(button_cfg["emoji"]) if button_cfg.get("emoji") else None),
+            custom_id=f"ticket:open:{source_channel_id}:{self.button_key}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.cog is None:
             await interaction.response.send_message("Sistema de ticket indisponivel no momento.", ephemeral=True)
             return
-        await cog._open_ticket_from_panel(interaction)
+        await self.cog._open_ticket_from_panel(interaction, self.source_channel_id, self.button_key)
 
 
 class TicketCloseView(discord.ui.View):
@@ -77,6 +106,12 @@ class TicketCloseView(discord.ui.View):
 
 
 class TicketGeneralModal(discord.ui.Modal, title="Configuracao geral de ticket"):
+    open_mode_input = discord.ui.TextInput(
+        label="Tipo de abertura (texto/embed)",
+        placeholder="texto",
+        required=True,
+        max_length=5,
+    )
     use_same_message_input = discord.ui.TextInput(
         label="Mesma mensagem em todos os paineis? (sim/nao)",
         placeholder="sim",
@@ -106,6 +141,7 @@ class TicketGeneralModal(discord.ui.Modal, title="Configuracao geral de ticket")
     def __init__(self, cog: "Ticket", defaults: dict):
         super().__init__()
         self.cog = cog
+        self.open_mode_input.default = str(defaults.get("open_mode", "texto"))
         self.use_same_message_input.default = "sim" if defaults.get("use_same_message", True) else "nao"
         if defaults.get("archive_category_id"):
             self.archive_category_input.default = str(defaults["archive_category_id"])
@@ -120,6 +156,12 @@ class TicketGeneralModal(discord.ui.Modal, title="Configuracao geral de ticket")
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
             return
+
+        raw_mode = str(self.open_mode_input.value).strip().lower()
+        if raw_mode not in {"texto", "text", "embed"}:
+            await interaction.response.send_message("Tipo invalido. Use 'texto' ou 'embed'.", ephemeral=True)
+            return
+        open_mode = "embed" if raw_mode == "embed" else "text"
 
         raw_same = str(self.use_same_message_input.value).strip().lower()
         if raw_same not in {"sim", "s", "nao", "n"}:
@@ -160,6 +202,7 @@ class TicketGeneralModal(discord.ui.Modal, title="Configuracao geral de ticket")
 
         await self.cog._upsert_ticket_settings(
             interaction.guild.id,
+            open_mode=open_mode,
             use_same_message=use_same_message,
             archive_category_id=archive_category_id,
             log_channel_id=log_channel_id,
@@ -204,6 +247,7 @@ class TicketOpenMessageModal(discord.ui.Modal, title="Mensagem de abertura"):
 
         await self.cog._upsert_ticket_settings(
             interaction.guild.id,
+            open_mode="text",
             open_message=message,
         )
         embed = self.cog._panel_embed(
@@ -297,7 +341,7 @@ class TicketOpenEmbedModal(discord.ui.Modal, title="Embed de abertura do ticket"
             "footer": str(self.footer_input.value).strip() or None,
             "image_url": str(self.image_url_input.value).strip() or None,
         }
-        await self.cog._upsert_ticket_settings(interaction.guild.id, open_embed=embed_payload)
+        await self.cog._upsert_ticket_settings(interaction.guild.id, open_mode="embed", open_embed=embed_payload)
 
         preview = discord.Embed(
             title=title,
@@ -311,40 +355,6 @@ class TicketOpenEmbedModal(discord.ui.Modal, title="Embed de abertura do ticket"
         if embed_payload["image_url"]:
             preview.set_image(url=embed_payload["image_url"])
         await interaction.response.send_message("Embed de abertura salvo! Preview:", embed=preview, ephemeral=True)
-
-
-class TicketOpenTypeSelect(discord.ui.Select):
-    def __init__(self, cog: "Ticket", owner_id: int):
-        self.cog = cog
-        self.owner_id = owner_id
-        options = [
-            discord.SelectOption(label="Texto", value="text", description="Mensagem de texto simples"),
-            discord.SelectOption(label="Embed", value="embed", description="Embed com titulo, cor e imagem"),
-        ]
-        super().__init__(placeholder="Escolha o tipo de mensagem de abertura", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        if selected == "text":
-            settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
-            await interaction.response.send_modal(
-                TicketOpenMessageModal(self.cog, (settings or {}).get("open_message"))
-            )
-            return
-        settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
-        raw_embed = (settings or {}).get("open_embed")
-        defaults = raw_embed if isinstance(raw_embed, dict) else None
-        await interaction.response.send_modal(TicketOpenEmbedModal(self.cog, defaults))
-
-
-class TicketOpenTypeView(PanelBaseView):
-    def __init__(self, cog: "Ticket", owner_id: int):
-        super().__init__(cog, owner_id)
-        self.add_item(TicketOpenTypeSelect(cog, owner_id))
-
-    @discord.ui.button(label="Voltar", style=discord.ButtonStyle.danger, row=2)
-    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await interaction.response.edit_message(embed=self.cog._main_embed(), view=TicketMainView(self.cog, self.owner_id))
 
 
 class TicketChannelAddModal(discord.ui.Modal, title="Adicionar canal de ticket"):
@@ -451,6 +461,127 @@ class TicketChannelRemoveModal(discord.ui.Modal, title="Remover canal de ticket"
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+class TicketButtonAddModal(discord.ui.Modal, title="Adicionar botao de ticket"):
+    source_channel_input = discord.ui.TextInput(
+        label="ID do canal de painel",
+        placeholder="Canal onde o painel sera publicado",
+        required=True,
+        max_length=20,
+    )
+    button_label_input = discord.ui.TextInput(
+        label="Texto do botao",
+        placeholder="Suporte",
+        required=True,
+        max_length=80,
+    )
+    prefix_input = discord.ui.TextInput(
+        label="Prefixo do ticket",
+        placeholder="suporte",
+        required=True,
+        max_length=20,
+    )
+    target_category_input = discord.ui.TextInput(
+        label="ID da categoria do tipo",
+        placeholder="Categoria onde esse tipo abre ticket",
+        required=True,
+        max_length=20,
+    )
+    custom_message_input = discord.ui.TextInput(
+        label="Mensagem para este botao (opcional)",
+        placeholder="Usada no modo texto quando global = nao",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+    )
+
+    def __init__(self, cog: "Ticket"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
+            return
+
+        try:
+            source_channel_id = int(str(self.source_channel_input.value).strip())
+            target_category_id = int(str(self.target_category_input.value).strip())
+        except ValueError:
+            await interaction.response.send_message("IDs invalidos. Use apenas numeros.", ephemeral=True)
+            return
+
+        source_channel = interaction.guild.get_channel(source_channel_id)
+        target_category = interaction.guild.get_channel(target_category_id)
+        if not isinstance(source_channel, discord.TextChannel):
+            await interaction.response.send_message("Canal de painel nao encontrado.", ephemeral=True)
+            return
+        if not isinstance(target_category, discord.CategoryChannel):
+            await interaction.response.send_message("Categoria nao encontrada.", ephemeral=True)
+            return
+
+        prefix = _sanitize_channel_name(str(self.prefix_input.value).strip().lower())
+        button_key = prefix[:20]
+        button_label = str(self.button_label_input.value).strip()
+        if not button_label:
+            await interaction.response.send_message("Texto do botao obrigatorio.", ephemeral=True)
+            return
+
+        custom_message = str(self.custom_message_input.value).strip() or None
+        await self.cog._upsert_ticket_panel_button(
+            guild_id=interaction.guild.id,
+            source_channel_id=source_channel.id,
+            button_key=button_key,
+            button_label=button_label,
+            prefix=prefix,
+            target_category_id=target_category.id,
+            custom_open_message=custom_message,
+            style="primary",
+            emoji=None,
+        )
+        await interaction.response.send_message(
+            f"Botao '{button_label}' adicionado para {source_channel.mention}.",
+            ephemeral=True,
+        )
+
+
+class TicketButtonRemoveModal(discord.ui.Modal, title="Remover botao de ticket"):
+    source_channel_input = discord.ui.TextInput(
+        label="ID do canal de painel",
+        placeholder="Canal onde o botao foi criado",
+        required=True,
+        max_length=20,
+    )
+    button_key_input = discord.ui.TextInput(
+        label="Chave do botao",
+        placeholder="Ex: suporte, member",
+        required=True,
+        max_length=20,
+    )
+
+    def __init__(self, cog: "Ticket"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
+            return
+
+        try:
+            source_channel_id = int(str(self.source_channel_input.value).strip())
+        except ValueError:
+            await interaction.response.send_message("ID do canal invalido.", ephemeral=True)
+            return
+
+        button_key = _sanitize_channel_name(str(self.button_key_input.value).strip())[:20]
+        removed = await self.cog._remove_ticket_panel_button(interaction.guild.id, source_channel_id, button_key)
+        if not removed:
+            await interaction.response.send_message("Botao nao encontrado para esse canal.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"Botao '{button_key}' removido.", ephemeral=True)
+
+
 class TicketRoleAddModal(discord.ui.Modal, title="Adicionar cargo de suporte"):
     role_id_input = discord.ui.TextInput(
         label="ID do cargo",
@@ -552,10 +683,13 @@ class TicketMainSelect(discord.ui.Select):
             await interaction.response.send_modal(TicketGeneralModal(self.cog, defaults or {}))
             return
         if selected == "open_message":
-            await interaction.response.edit_message(
-                embed=self.cog._open_message_type_embed(),
-                view=TicketOpenTypeView(self.cog, self.owner_id),
-            )
+            settings = await self.cog._get_ticket_settings(interaction.guild.id) if interaction.guild else {}
+            open_mode = str((settings or {}).get("open_mode", "text"))
+            if open_mode == "embed":
+                defaults = _normalize_open_embed((settings or {}).get("open_embed"))
+                await interaction.response.send_modal(TicketOpenEmbedModal(self.cog, defaults))
+                return
+            await interaction.response.send_modal(TicketOpenMessageModal(self.cog, (settings or {}).get("open_message")))
             return
         if selected == "channels":
             await interaction.response.edit_message(
@@ -588,6 +722,9 @@ class TicketChannelsSelect(discord.ui.Select):
             discord.SelectOption(label="Adicionar canal", value="add", description="Vincular canal de painel + categoria de ticket"),
             discord.SelectOption(label="Remover canal", value="remove", description="Excluir canal da configuracao"),
             discord.SelectOption(label="Listar canais", value="list", description="Ver canais configurados"),
+            discord.SelectOption(label="Adicionar botao", value="add_button", description="Criar novo tipo de ticket no painel"),
+            discord.SelectOption(label="Remover botao", value="remove_button", description="Excluir tipo de ticket do painel"),
+            discord.SelectOption(label="Listar botoes", value="list_buttons", description="Ver botoes por canal"),
         ]
         super().__init__(placeholder="Acoes para canais de ticket", min_values=1, max_values=1, options=options)
 
@@ -598,6 +735,15 @@ class TicketChannelsSelect(discord.ui.Select):
             return
         if selected == "remove":
             await interaction.response.send_modal(TicketChannelRemoveModal(self.cog))
+            return
+        if selected == "add_button":
+            await interaction.response.send_modal(TicketButtonAddModal(self.cog))
+            return
+        if selected == "remove_button":
+            await interaction.response.send_modal(TicketButtonRemoveModal(self.cog))
+            return
+        if selected == "list_buttons":
+            await self.cog._list_ticket_buttons(interaction)
             return
         await self.cog._list_ticket_channels(interaction)
 
@@ -657,6 +803,7 @@ class Ticket(commands.Cog):
             CREATE TABLE IF NOT EXISTS ticket_settings (
                 guild_id BIGINT PRIMARY KEY,
                 open_message TEXT,
+                open_mode TEXT NOT NULL DEFAULT 'text',
                 close_message TEXT,
                 use_same_message BOOLEAN NOT NULL DEFAULT TRUE,
                 archive_category_id BIGINT,
@@ -703,11 +850,67 @@ class Ticket(commands.Cog):
             """
         )
         await pool.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_panel_buttons (
+                guild_id BIGINT NOT NULL,
+                source_channel_id BIGINT NOT NULL,
+                button_key TEXT NOT NULL,
+                button_label TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                target_category_id BIGINT NOT NULL,
+                custom_open_message TEXT,
+                style TEXT NOT NULL DEFAULT 'primary',
+                emoji TEXT,
+                PRIMARY KEY (guild_id, source_channel_id, button_key)
+            )
+            """
+        )
+        await pool.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_counters (
+                guild_id BIGINT NOT NULL,
+                prefix TEXT NOT NULL,
+                last_number BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, prefix)
+            )
+            """
+        )
+        await pool.execute(
             "ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS open_embed JSONB"
         )
+        await pool.execute(
+            "ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS open_mode TEXT NOT NULL DEFAULT 'text'"
+        )
+        await pool.execute(
+            "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ticket_type TEXT"
+        )
+        await pool.execute(
+            "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ticket_prefix TEXT"
+        )
 
-        self.bot.add_view(TicketPanelPostView())
         self.bot.add_view(TicketCloseView())
+        await self._restore_ticket_panel_views()
+
+    async def _restore_ticket_panel_views(self):
+        pool = self._get_pool()
+        if pool is None:
+            return
+
+        rows = await pool.fetch(
+            """
+            SELECT guild_id, source_channel_id, panel_message_id
+            FROM ticket_channels
+            WHERE panel_message_id IS NOT NULL
+            """
+        )
+        for row in rows:
+            buttons = await self._get_ticket_panel_buttons(int(row["guild_id"]), int(row["source_channel_id"]))
+            if not buttons:
+                continue
+            self.bot.add_view(
+                TicketPanelPostView(self, int(row["source_channel_id"]), buttons),
+                message_id=int(row["panel_message_id"]),
+            )
 
     def _get_pool(self):
         return getattr(self.bot, "pool", None) or getattr(self.bot, "db", None)
@@ -738,24 +941,13 @@ class Ticket(commands.Cog):
             "Selecione a proxima etapa para configurar.",
         )
 
-    def _open_message_type_embed(self) -> discord.Embed:
-        return self._panel_embed(
-            "Mensagem de Abertura",
-            "Escolha o formato da mensagem enviada ao abrir um ticket.\n\n"
-            "• **Texto** — mensagem simples (suporta `{member}`, `{server}`)\n"
-            "• **Embed** — embed personalizado com titulo, cor, imagem e footer",
-            2,
-            5,
-            "Escolha Texto ou Embed para configurar.",
-        )
-
     def _ticket_channels_embed(self) -> discord.Embed:
         return self._panel_embed(
             "Canais de Ticket",
-            "Gerencie um ou mais canais de painel e suas categorias de abertura de ticket.",
+            "Gerencie um ou mais canais de painel e seus tipos de ticket com botoes.",
             4,
             5,
-            "Adicione, remova ou liste os canais configurados.",
+            "Adicione/remova canais e botoes, depois publique os paineis.",
         )
 
     def _ticket_roles_embed(self) -> discord.Embed:
@@ -776,19 +968,24 @@ class Ticket(commands.Cog):
             return None
         row = await pool.fetchrow(
             """
-            SELECT guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id, open_embed
+            SELECT guild_id, open_message, open_mode, close_message, use_same_message, archive_category_id, log_channel_id, open_embed
             FROM ticket_settings
             WHERE guild_id = $1
             """,
             guild_id,
         )
-        return dict(row) if row else None
+        if not row:
+            return None
+        payload = dict(row)
+        payload["open_embed"] = _normalize_open_embed(payload.get("open_embed"))
+        return payload
 
     async def _upsert_ticket_settings(
         self,
         guild_id: int,
         *,
         open_message: str | None = None,
+        open_mode: str | None = None,
         close_message: str | None = None,
         use_same_message: bool | None = None,
         archive_category_id: int | None = None,
@@ -801,21 +998,24 @@ class Ticket(commands.Cog):
 
         current = await self._get_ticket_settings(guild_id) or {}
         next_open = open_message if open_message is not None else current.get("open_message")
+        next_mode = open_mode if open_mode is not None else current.get("open_mode", "text")
         next_close = close_message if close_message is not None else current.get("close_message")
         next_same = use_same_message if use_same_message is not None else current.get("use_same_message", True)
         next_archive = archive_category_id if archive_category_id is not None else current.get("archive_category_id")
         next_log = log_channel_id if log_channel_id is not None else current.get("log_channel_id")
         next_embed = open_embed if open_embed is not None else current.get("open_embed")
+        next_embed_db = json.dumps(next_embed) if isinstance(next_embed, dict) else next_embed
 
         await pool.execute(
             """
             INSERT INTO ticket_settings (
-                guild_id, open_message, close_message, use_same_message, archive_category_id, log_channel_id, open_embed, updated_at
+                guild_id, open_message, open_mode, close_message, use_same_message, archive_category_id, log_channel_id, open_embed, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
             ON CONFLICT (guild_id)
             DO UPDATE SET
                 open_message = EXCLUDED.open_message,
+                open_mode = EXCLUDED.open_mode,
                 close_message = EXCLUDED.close_message,
                 use_same_message = EXCLUDED.use_same_message,
                 archive_category_id = EXCLUDED.archive_category_id,
@@ -825,11 +1025,12 @@ class Ticket(commands.Cog):
             """,
             guild_id,
             next_open,
+            next_mode,
             next_close,
             next_same,
             next_archive,
             next_log,
-            next_embed,
+            next_embed_db,
         )
 
     async def _upsert_ticket_channel(
@@ -851,6 +1052,22 @@ class Ticket(commands.Cog):
             DO UPDATE SET
                 target_category_id = EXCLUDED.target_category_id,
                 custom_open_message = EXCLUDED.custom_open_message
+            """,
+            guild_id,
+            source_channel_id,
+            target_category_id,
+            custom_open_message,
+        )
+        await pool.execute(
+            """
+            INSERT INTO ticket_panel_buttons (
+                guild_id, source_channel_id, button_key, button_label, prefix, target_category_id, custom_open_message, style, emoji
+            )
+            VALUES ($1, $2, 'support', 'Suporte', 'support', $3, $4, 'primary', '🎫')
+            ON CONFLICT (guild_id, source_channel_id, button_key)
+            DO UPDATE SET
+                target_category_id = EXCLUDED.target_category_id,
+                custom_open_message = COALESCE(ticket_panel_buttons.custom_open_message, EXCLUDED.custom_open_message)
             """,
             guild_id,
             source_channel_id,
@@ -883,6 +1100,96 @@ class Ticket(commands.Cog):
             guild_id,
         )
         return [dict(row) for row in rows]
+
+    async def _upsert_ticket_panel_button(
+        self,
+        *,
+        guild_id: int,
+        source_channel_id: int,
+        button_key: str,
+        button_label: str,
+        prefix: str,
+        target_category_id: int,
+        custom_open_message: str | None,
+        style: str,
+        emoji: str | None,
+    ) -> None:
+        pool = self._get_pool()
+        if pool is None:
+            return
+        await pool.execute(
+            """
+            INSERT INTO ticket_panel_buttons (
+                guild_id, source_channel_id, button_key, button_label, prefix, target_category_id, custom_open_message, style, emoji
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (guild_id, source_channel_id, button_key)
+            DO UPDATE SET
+                button_label = EXCLUDED.button_label,
+                prefix = EXCLUDED.prefix,
+                target_category_id = EXCLUDED.target_category_id,
+                custom_open_message = EXCLUDED.custom_open_message,
+                style = EXCLUDED.style,
+                emoji = EXCLUDED.emoji
+            """,
+            guild_id,
+            source_channel_id,
+            button_key,
+            button_label,
+            prefix,
+            target_category_id,
+            custom_open_message,
+            style,
+            emoji,
+        )
+
+    async def _remove_ticket_panel_button(self, guild_id: int, source_channel_id: int, button_key: str) -> bool:
+        pool = self._get_pool()
+        if pool is None:
+            return False
+        result = await pool.execute(
+            """
+            DELETE FROM ticket_panel_buttons
+            WHERE guild_id = $1 AND source_channel_id = $2 AND button_key = $3
+            """,
+            guild_id,
+            source_channel_id,
+            button_key,
+        )
+        return result.endswith("1")
+
+    async def _get_ticket_panel_buttons(self, guild_id: int, source_channel_id: int) -> list[dict]:
+        pool = self._get_pool()
+        if pool is None:
+            return []
+        rows = await pool.fetch(
+            """
+            SELECT button_key, button_label, prefix, target_category_id, custom_open_message, style, emoji
+            FROM ticket_panel_buttons
+            WHERE guild_id = $1 AND source_channel_id = $2
+            ORDER BY button_key ASC
+            """,
+            guild_id,
+            source_channel_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def _next_ticket_number(self, guild_id: int, prefix: str) -> int:
+        pool = self._get_pool()
+        if pool is None:
+            return 1
+        row = await pool.fetchrow(
+            """
+            INSERT INTO ticket_counters (guild_id, prefix, last_number)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (guild_id, prefix)
+            DO UPDATE SET last_number = ticket_counters.last_number + 1
+            RETURNING last_number
+            """,
+            guild_id,
+            prefix,
+        )
+        return int(row["last_number"]) if row else 1
 
     async def _add_ticket_role(self, guild_id: int, role_id: int) -> None:
         pool = self._get_pool()
@@ -927,10 +1234,14 @@ class Ticket(commands.Cog):
         channels = await self._get_ticket_channels(interaction.guild.id)
         settings = await self._get_ticket_settings(interaction.guild.id) or {}
         open_message = settings.get("open_message")
+        open_embed = settings.get("open_embed")
         if not channels:
             await interaction.response.send_message("Nenhum canal de ticket configurado ainda.", ephemeral=True)
             return
-        if not open_message:
+        if settings.get("open_mode", "text") == "embed" and not open_embed:
+            await interaction.response.send_message("Defina o embed de abertura antes de publicar os paineis.", ephemeral=True)
+            return
+        if settings.get("open_mode", "text") != "embed" and not open_message:
             await interaction.response.send_message("Defina a mensagem de abertura antes de publicar os paineis.", ephemeral=True)
             return
 
@@ -941,12 +1252,16 @@ class Ticket(commands.Cog):
             await interaction.response.send_message("Banco de dados indisponivel no momento.", ephemeral=True)
             return
 
-        panel_view = TicketPanelPostView()
-
         for channel_cfg in channels:
             source_channel = interaction.guild.get_channel(channel_cfg["source_channel_id"])
             if not isinstance(source_channel, discord.TextChannel):
                 continue
+
+            button_rows = await self._get_ticket_panel_buttons(interaction.guild.id, source_channel.id)
+            if not button_rows:
+                continue
+
+            panel_view = TicketPanelPostView(self, source_channel.id, button_rows)
 
             panel_text = (
                 open_message
@@ -955,7 +1270,7 @@ class Ticket(commands.Cog):
             )
             panel_embed = discord.Embed(
                 title="Central de Tickets",
-                description=_short_text(panel_text, "Clique no botao abaixo para abrir um ticket."),
+                description=_short_text(panel_text, "Clique em um dos botoes abaixo para abrir seu ticket."),
                 color=discord.Color.blurple(),
                 timestamp=datetime.utcnow(),
             )
@@ -973,6 +1288,7 @@ class Ticket(commands.Cog):
                 source_channel.id,
                 message.id,
             )
+            self.bot.add_view(panel_view, message_id=message.id)
 
         embed = self._panel_embed(
             "Paineis publicados",
@@ -998,7 +1314,10 @@ class Ticket(commands.Cog):
             source = f"<#{cfg['source_channel_id']}>"
             category = f"<#{cfg['target_category_id']}>"
             custom = "sim" if cfg.get("custom_open_message") else "nao"
-            lines.append(f"• Painel: {source} | Categoria: {category} | Msg personalizada: {custom}")
+            button_count = len(await self._get_ticket_panel_buttons(interaction.guild.id, int(cfg["source_channel_id"])))
+            lines.append(
+                f"• Painel: {source} | Categoria padrao: {category} | Msg personalizada: {custom} | Botoes: {button_count}"
+            )
 
         embed = self._panel_embed(
             "Canais configurados",
@@ -1006,6 +1325,38 @@ class Ticket(commands.Cog):
             4,
             5,
             "Se necessario, ajuste canais e publique os paineis novamente.",
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _list_ticket_buttons(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
+            return
+
+        channels = await self._get_ticket_channels(interaction.guild.id)
+        if not channels:
+            await interaction.response.send_message("Nenhum canal de ticket configurado.", ephemeral=True)
+            return
+
+        sections = []
+        for cfg in channels:
+            source_channel_id = int(cfg["source_channel_id"])
+            buttons = await self._get_ticket_panel_buttons(interaction.guild.id, source_channel_id)
+            if not buttons:
+                sections.append(f"Canal <#{source_channel_id}>: nenhum botao")
+                continue
+            lines = [
+                f"- {b['button_label']} | chave: {b['button_key']} | prefixo: {b['prefix']} | categoria: <#{b['target_category_id']}>"
+                for b in buttons
+            ]
+            sections.append(f"Canal <#{source_channel_id}>:\n" + "\n".join(lines))
+
+        embed = self._panel_embed(
+            "Botoes configurados",
+            _short_text("\n\n".join(sections), "Nenhum botao configurado."),
+            4,
+            5,
+            "Use adicionar/remover botao para ajustar os tipos de ticket.",
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1047,7 +1398,7 @@ class Ticket(commands.Cog):
         )
         embed.add_field(
             name="Tipo de abertura",
-            value="Embed" if settings.get("open_embed") else "Texto",
+            value=("Embed" if settings.get("open_mode", "text") == "embed" else "Texto"),
             inline=True,
         )
         embed.add_field(
@@ -1091,7 +1442,12 @@ class Ticket(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def _open_ticket_from_panel(self, interaction: discord.Interaction):
+    async def _open_ticket_from_panel(
+        self,
+        interaction: discord.Interaction,
+        source_channel_id: int | None = None,
+        button_key: str | None = None,
+    ):
         guild = interaction.guild
         if guild is None or not isinstance(interaction.channel, discord.TextChannel):
             await interaction.response.send_message("Esse botao so funciona em canal de servidor.", ephemeral=True)
@@ -1102,19 +1458,39 @@ class Ticket(commands.Cog):
             await interaction.response.send_message("Banco de dados indisponivel no momento.", ephemeral=True)
             return
 
-        source_channel_id = interaction.channel.id
+        source_channel_id = source_channel_id or interaction.channel.id
+        button_key = button_key or "support"
+
         cfg = await pool.fetchrow(
             """
-            SELECT target_category_id, custom_open_message
-            FROM ticket_channels
-            WHERE guild_id = $1 AND source_channel_id = $2
+            SELECT button_key, button_label, prefix, target_category_id, custom_open_message
+            FROM ticket_panel_buttons
+            WHERE guild_id = $1 AND source_channel_id = $2 AND button_key = $3
             """,
             guild.id,
             source_channel_id,
+            button_key,
         )
         if not cfg:
-            await interaction.response.send_message("Este canal nao esta configurado para abrir ticket.", ephemeral=True)
-            return
+            legacy = await pool.fetchrow(
+                """
+                SELECT target_category_id, custom_open_message
+                FROM ticket_channels
+                WHERE guild_id = $1 AND source_channel_id = $2
+                """,
+                guild.id,
+                source_channel_id,
+            )
+            if not legacy:
+                await interaction.response.send_message("Este canal nao esta configurado para abrir ticket.", ephemeral=True)
+                return
+            cfg = {
+                "button_key": "support",
+                "button_label": "Suporte",
+                "prefix": "support",
+                "target_category_id": legacy["target_category_id"],
+                "custom_open_message": legacy["custom_open_message"],
+            }
 
         settings = await self._get_ticket_settings(guild.id) or {}
         target_category = guild.get_channel(cfg["target_category_id"])
@@ -1171,7 +1547,9 @@ class Ticket(commands.Cog):
                     manage_messages=True,
                 )
 
-        ticket_name = f"ticket-{_sanitize_channel_name(interaction.user.name)}"
+        ticket_prefix = _sanitize_channel_name(str(cfg["prefix"]))
+        next_number = await self._next_ticket_number(guild.id, ticket_prefix)
+        ticket_name = f"{ticket_prefix}-{next_number:04d}"
         ticket_channel = await guild.create_text_channel(
             name=ticket_name,
             category=target_category,
@@ -1181,13 +1559,15 @@ class Ticket(commands.Cog):
 
         await pool.execute(
             """
-            INSERT INTO tickets (guild_id, ticket_channel_id, source_channel_id, opener_id, status)
-            VALUES ($1, $2, $3, $4, 'open')
+            INSERT INTO tickets (guild_id, ticket_channel_id, source_channel_id, opener_id, status, ticket_type, ticket_prefix)
+            VALUES ($1, $2, $3, $4, 'open', $5, $6)
             """,
             guild.id,
             ticket_channel.id,
             source_channel_id,
             interaction.user.id,
+            str(cfg["button_key"]),
+            ticket_prefix,
         )
 
         use_same = bool(settings.get("use_same_message", True))
@@ -1197,8 +1577,10 @@ class Ticket(commands.Cog):
             base_message = cfg["custom_open_message"]
             open_embed_payload = None
 
+        open_mode = str(settings.get("open_mode", "text"))
+
         support_mentions = " ".join([f"<@&{r}>" for r in support_role_ids])
-        if open_embed_payload and isinstance(open_embed_payload, dict):
+        if open_mode == "embed" and open_embed_payload and isinstance(open_embed_payload, dict):
             raw_color = open_embed_payload.get("color")
             embed_color = discord.Color(raw_color) if isinstance(raw_color, int) else discord.Color.green()
             desc = (
@@ -1206,6 +1588,7 @@ class Ticket(commands.Cog):
                 .replace("{member}", interaction.user.mention)
                 .replace("{user}", interaction.user.mention)
                 .replace("{server}", guild.name)
+                .replace("{type}", str(cfg["button_label"]))
             )
             open_embed = discord.Embed(
                 title=str(open_embed_payload.get("title", "Ticket Aberto")),
@@ -1225,6 +1608,7 @@ class Ticket(commands.Cog):
                 .replace("{member}", interaction.user.mention)
                 .replace("{user}", interaction.user.mention)
                 .replace("{server}", guild.name)
+                .replace("{type}", str(cfg["button_label"]))
             )
             open_embed = discord.Embed(
                 title="Ticket Aberto",
