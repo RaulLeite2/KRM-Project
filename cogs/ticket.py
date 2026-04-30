@@ -25,6 +25,34 @@ def _sanitize_channel_name(name: str) -> str:
     return cleaned or "ticket"
 
 
+def _parse_ticket_type_labels(raw: str | None) -> list[str]:
+    if not raw:
+        return ["Suporte"]
+
+    labels: list[str] = []
+    for chunk in re.split(r"[,\n;]+", raw):
+        text = chunk.strip()
+        if not text:
+            continue
+        labels.append(text[:80])
+
+    if not labels:
+        return ["Suporte"]
+
+    deduped: list[str] = []
+    seen_keys: set[str] = set()
+    for label in labels:
+        key = _sanitize_channel_name(label)[:20]
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(label)
+        if len(deduped) >= 25:
+            break
+
+    return deduped or ["Suporte"]
+
+
 def _normalize_open_embed(raw: object) -> dict | None:
     if isinstance(raw, dict):
         return raw
@@ -377,6 +405,12 @@ class TicketChannelAddModal(discord.ui.Modal, title="Adicionar canal de ticket")
         style=discord.TextStyle.paragraph,
         max_length=2000,
     )
+    ticket_types_input = discord.ui.TextInput(
+        label="Tipos de ticket (separe por virgula)",
+        placeholder="suporte, member, parceria",
+        required=False,
+        max_length=1000,
+    )
 
     def __init__(self, cog: "Ticket"):
         super().__init__()
@@ -411,9 +445,28 @@ class TicketChannelAddModal(discord.ui.Modal, title="Adicionar canal de ticket")
             custom_open_message=custom_message,
         )
 
+        created_labels: list[str] = []
+        for label in _parse_ticket_type_labels(str(self.ticket_types_input.value).strip()):
+            prefix = _sanitize_channel_name(label)
+            button_key = prefix[:20]
+            await self.cog._upsert_ticket_panel_button(
+                guild_id=interaction.guild.id,
+                source_channel_id=source_channel.id,
+                button_key=button_key,
+                button_label=label,
+                prefix=prefix,
+                target_category_id=target_category.id,
+                custom_open_message=custom_message,
+                style="primary",
+                emoji=None,
+            )
+            created_labels.append(label)
+
         embed = self.cog._panel_embed(
             "Canal adicionado",
-            f"Painel: {source_channel.mention}\nCategoria: {target_category.mention}",
+            f"Painel: {source_channel.mention}\n"
+            f"Categoria: {target_category.mention}\n"
+            f"Botoes: {', '.join(created_labels)}",
             4,
             5,
             "Publique ou atualize os paineis para este canal.",
@@ -474,24 +527,23 @@ class TicketButtonAddModal(discord.ui.Modal, title="Adicionar botao de ticket"):
         required=True,
         max_length=80,
     )
-    prefix_input = discord.ui.TextInput(
-        label="Prefixo do ticket",
-        placeholder="suporte",
-        required=True,
-        max_length=20,
-    )
     target_category_input = discord.ui.TextInput(
         label="ID da categoria do tipo",
         placeholder="Categoria onde esse tipo abre ticket",
         required=True,
         max_length=20,
     )
-    custom_message_input = discord.ui.TextInput(
-        label="Mensagem para este botao (opcional)",
-        placeholder="Usada no modo texto quando global = nao",
+    style_input = discord.ui.TextInput(
+        label="Estilo do botao (primary/secondary/success/danger)",
+        placeholder="primary",
         required=False,
-        style=discord.TextStyle.paragraph,
-        max_length=2000,
+        max_length=10,
+    )
+    emoji_input = discord.ui.TextInput(
+        label="Emoji do botao (opcional)",
+        placeholder="🎫 ou <:nome:id>",
+        required=False,
+        max_length=100,
     )
 
     def __init__(self, cog: "Ticket"):
@@ -519,14 +571,20 @@ class TicketButtonAddModal(discord.ui.Modal, title="Adicionar botao de ticket"):
             await interaction.response.send_message("Categoria nao encontrada.", ephemeral=True)
             return
 
-        prefix = _sanitize_channel_name(str(self.prefix_input.value).strip().lower())
-        button_key = prefix[:20]
         button_label = str(self.button_label_input.value).strip()
         if not button_label:
             await interaction.response.send_message("Texto do botao obrigatorio.", ephemeral=True)
             return
 
-        custom_message = str(self.custom_message_input.value).strip() or None
+        prefix = _sanitize_channel_name(button_label.lower())[:20]
+        button_key = prefix
+
+        valid_styles = {"primary", "secondary", "success", "danger"}
+        raw_style = str(self.style_input.value).strip().lower() if self.style_input.value else "primary"
+        style = raw_style if raw_style in valid_styles else "primary"
+
+        emoji = str(self.emoji_input.value).strip() or None
+
         await self.cog._upsert_ticket_panel_button(
             guild_id=interaction.guild.id,
             source_channel_id=source_channel.id,
@@ -534,12 +592,110 @@ class TicketButtonAddModal(discord.ui.Modal, title="Adicionar botao de ticket"):
             button_label=button_label,
             prefix=prefix,
             target_category_id=target_category.id,
-            custom_open_message=custom_message,
-            style="primary",
-            emoji=None,
+            custom_open_message=None,
+            style=style,
+            emoji=emoji,
         )
         await interaction.response.send_message(
-            f"Botao '{button_label}' adicionado para {source_channel.mention}.",
+            f"Botao '{button_label}' adicionado para {source_channel.mention} "
+            f"(estilo: `{style}`, emoji: {emoji or 'nenhum'}).",
+            ephemeral=True,
+        )
+
+
+class TicketButtonEditModal(discord.ui.Modal, title="Editar botao de ticket"):
+    source_channel_input = discord.ui.TextInput(
+        label="ID do canal de painel",
+        placeholder="Canal onde o botao esta publicado",
+        required=True,
+        max_length=20,
+    )
+    button_key_input = discord.ui.TextInput(
+        label="Chave do botao (ex: suporte, member)",
+        placeholder="Use /ticket canais > Listar botoes para ver as chaves",
+        required=True,
+        max_length=20,
+    )
+    style_input = discord.ui.TextInput(
+        label="Novo estilo (primary/secondary/success/danger)",
+        placeholder="primary",
+        required=False,
+        max_length=10,
+    )
+    emoji_input = discord.ui.TextInput(
+        label="Novo emoji (deixe vazio para remover)",
+        placeholder="🎫 ou <:nome:id>",
+        required=False,
+        max_length=100,
+    )
+    custom_message_input = discord.ui.TextInput(
+        label="Mensagem deste botao (deixe vazio para global)",
+        placeholder="Ola {member}, descreva o problema.",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+    )
+
+    def __init__(self, cog: "Ticket"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona em servidor.", ephemeral=True)
+            return
+
+        try:
+            source_channel_id = int(str(self.source_channel_input.value).strip())
+        except ValueError:
+            await interaction.response.send_message("ID do canal invalido.", ephemeral=True)
+            return
+
+        button_key = _sanitize_channel_name(str(self.button_key_input.value).strip())[:20]
+
+        pool = self.cog._get_pool()
+        if pool is None:
+            await interaction.response.send_message("Banco de dados indisponivel.", ephemeral=True)
+            return
+
+        row = await pool.fetchrow(
+            """
+            SELECT button_label, prefix, target_category_id, style, emoji, custom_open_message
+            FROM ticket_panel_buttons
+            WHERE guild_id = $1 AND source_channel_id = $2 AND button_key = $3
+            """,
+            interaction.guild.id,
+            source_channel_id,
+            button_key,
+        )
+        if row is None:
+            await interaction.response.send_message(
+                f"Botao com chave `{button_key}` nao encontrado para esse canal.", ephemeral=True
+            )
+            return
+
+        valid_styles = {"primary", "secondary", "success", "danger"}
+        raw_style = str(self.style_input.value).strip().lower() if self.style_input.value else str(row["style"])
+        style = raw_style if raw_style in valid_styles else str(row["style"])
+
+        emoji_raw = str(self.emoji_input.value).strip() if self.emoji_input.value else None
+        emoji = emoji_raw or None  # empty string = remove emoji
+
+        custom_message = str(self.custom_message_input.value).strip() or None
+
+        await self.cog._upsert_ticket_panel_button(
+            guild_id=interaction.guild.id,
+            source_channel_id=source_channel_id,
+            button_key=button_key,
+            button_label=str(row["button_label"]),
+            prefix=str(row["prefix"]),
+            target_category_id=int(row["target_category_id"]),
+            custom_open_message=custom_message,
+            style=style,
+            emoji=emoji,
+        )
+        await interaction.response.send_message(
+            f"Botao `{button_key}` atualizado (estilo: `{style}`, emoji: {emoji or 'nenhum'}).",
             ephemeral=True,
         )
 
@@ -723,6 +879,7 @@ class TicketChannelsSelect(discord.ui.Select):
             discord.SelectOption(label="Remover canal", value="remove", description="Excluir canal da configuracao"),
             discord.SelectOption(label="Listar canais", value="list", description="Ver canais configurados"),
             discord.SelectOption(label="Adicionar botao", value="add_button", description="Criar novo tipo de ticket no painel"),
+            discord.SelectOption(label="Editar botao", value="edit_button", description="Alterar estilo, emoji ou mensagem de um botao"),
             discord.SelectOption(label="Remover botao", value="remove_button", description="Excluir tipo de ticket do painel"),
             discord.SelectOption(label="Listar botoes", value="list_buttons", description="Ver botoes por canal"),
         ]
@@ -738,6 +895,9 @@ class TicketChannelsSelect(discord.ui.Select):
             return
         if selected == "add_button":
             await interaction.response.send_modal(TicketButtonAddModal(self.cog))
+            return
+        if selected == "edit_button":
+            await interaction.response.send_modal(TicketButtonEditModal(self.cog))
             return
         if selected == "remove_button":
             await interaction.response.send_modal(TicketButtonRemoveModal(self.cog))
@@ -1058,22 +1218,6 @@ class Ticket(commands.Cog):
             target_category_id,
             custom_open_message,
         )
-        await pool.execute(
-            """
-            INSERT INTO ticket_panel_buttons (
-                guild_id, source_channel_id, button_key, button_label, prefix, target_category_id, custom_open_message, style, emoji
-            )
-            VALUES ($1, $2, 'support', 'Suporte', 'support', $3, $4, 'primary', '🎫')
-            ON CONFLICT (guild_id, source_channel_id, button_key)
-            DO UPDATE SET
-                target_category_id = EXCLUDED.target_category_id,
-                custom_open_message = COALESCE(ticket_panel_buttons.custom_open_message, EXCLUDED.custom_open_message)
-            """,
-            guild_id,
-            source_channel_id,
-            target_category_id,
-            custom_open_message,
-        )
 
     async def _remove_ticket_channel(self, guild_id: int, source_channel_id: int) -> bool:
         pool = self._get_pool()
@@ -1259,7 +1403,20 @@ class Ticket(commands.Cog):
 
             button_rows = await self._get_ticket_panel_buttons(interaction.guild.id, source_channel.id)
             if not button_rows:
-                continue
+                await self._upsert_ticket_panel_button(
+                    guild_id=interaction.guild.id,
+                    source_channel_id=source_channel.id,
+                    button_key="suporte",
+                    button_label="Suporte",
+                    prefix="suporte",
+                    target_category_id=int(channel_cfg["target_category_id"]),
+                    custom_open_message=channel_cfg.get("custom_open_message"),
+                    style="primary",
+                    emoji="🎫",
+                )
+                button_rows = await self._get_ticket_panel_buttons(interaction.guild.id, source_channel.id)
+                if not button_rows:
+                    continue
 
             panel_view = TicketPanelPostView(self, source_channel.id, button_rows)
 

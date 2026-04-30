@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from typing import Optional
 
 import discord
@@ -902,11 +903,23 @@ class Painel(commands.Cog):
             "Revise as informacoes antes de editar ou testar novamente.",
         )
 
+        def _safe_embed_payload(raw_payload):
+            if isinstance(raw_payload, dict):
+                return raw_payload
+            if isinstance(raw_payload, str):
+                try:
+                    parsed = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
         if row:
             welcome_channel = f"<#{row['welcome_channel_id']}>" if row["welcome_channel_id"] else "Nao configurado"
             welcome_message = row["welcome_message"] if row["welcome_message"] else "Nao configurado"
-            welcome_embed = "Configurado" if row["welcome_embed"] else "Nao configurado"
-            welcome_embed_fields = len(row["welcome_embed"].get("fields", [])) if row["welcome_embed"] else 0
+            safe_welcome_embed = _safe_embed_payload(row["welcome_embed"])
+            welcome_embed = "Configurado" if safe_welcome_embed else "Nao configurado"
+            welcome_embed_fields = len(safe_welcome_embed.get("fields", [])) if safe_welcome_embed else 0
             exit_channel = f"<#{row['exit_channel_id']}>" if row["exit_channel_id"] else "Nao configurado"
             exit_message = row["exit_message"] if row["exit_message"] else "Nao configurado"
         else:
@@ -919,7 +932,11 @@ class Painel(commands.Cog):
 
         draft_status = "Sim" if draft else "Nao"
         draft_channel = f"<#{draft['channel_id']}>" if draft and draft.get("channel_id") else "-"
-        draft_fields = draft["payload"].get("fields", []) if draft else (row["welcome_embed"].get("fields", []) if row and row["welcome_embed"] else [])
+        if draft and isinstance(draft.get("payload"), dict):
+            draft_fields = draft["payload"].get("fields", [])
+        else:
+            safe_row_embed = _safe_embed_payload(row["welcome_embed"]) if row else None
+            draft_fields = safe_row_embed.get("fields", []) if safe_row_embed else []
 
         embed.add_field(name="Canal de boas-vindas", value=welcome_channel, inline=True)
         embed.add_field(name="Boas-vindas em texto", value=welcome_message[:1024], inline=False)
